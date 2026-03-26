@@ -33,7 +33,7 @@ from PyQt5.QtWidgets import (
     QRadioButton,
 )
 from ui.mixins import FrameControlMixin
-from PyQt5.QtCore import Qt, QSize
+from PyQt5.QtCore import Qt, QSize, QThread, pyqtSignal
 from PyQt5.QtWidgets import QStyle
 from PyQt5.QtGui import QKeySequence, QColor
 import copy
@@ -55,7 +55,109 @@ from ui.widgets import ToggleSwitch, ClickToggleList
 import os
 import cv2
 import re
+import yaml
 from datetime import datetime
+
+
+class YoloTrainDialog(QDialog):
+    def __init__(self, parent=None, default_epochs=10):
+        super().__init__(parent)
+        self.setWindowTitle("YOLO Incremental Training Config")
+        self.setMinimumWidth(400)
+        
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+        
+        self.epochs_spin = QSpinBox()
+        self.epochs_spin.setRange(1, 1000)
+        self.epochs_spin.setValue(default_epochs)
+        form.addRow("Epochs:", self.epochs_spin)
+        
+        self.batch_spin = QSpinBox()
+        self.batch_spin.setRange(1, 128)
+        self.batch_spin.setValue(8)
+        form.addRow("Batch Size:", self.batch_spin)
+
+        self.imgsz_spin = QSpinBox()
+        self.imgsz_spin.setRange(320, 1280)
+        self.imgsz_spin.setSingleStep(32)
+        self.imgsz_spin.setValue(640)
+        form.addRow("Image Size:", self.imgsz_spin)
+
+        self.lr_edit = QLineEdit("0.01")
+        form.addRow("Learning Rate (Fine-tuning):", self.lr_edit)
+        
+        self.train_split_spin = QSpinBox()
+        self.train_split_spin.setRange(50, 95)
+        self.train_split_spin.setValue(80)
+        self.train_split_spin.setSuffix("% Train")
+        form.addRow("Train/Val Split:", self.train_split_spin)
+
+        self.output_dir_edit = QLineEdit(os.path.join(os.getcwd(), "incremental_train"))
+        btn_out = QPushButton("...")
+        btn_out.setFixedWidth(30)
+        btn_out.clicked.connect(self._choose_out)
+        h_out = QHBoxLayout()
+        h_out.addWidget(self.output_dir_edit)
+        h_out.addWidget(btn_out)
+        form.addRow("Dataset Output Dir:", h_out)
+        
+        layout.addLayout(form)
+        
+        self.btn_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        self.btn_box.accepted.connect(self.accept)
+        self.btn_box.rejected.connect(self.reject)
+        layout.addWidget(self.btn_box)
+
+    def _choose_out(self):
+        d = QFileDialog.getExistingDirectory(self, "Choose Output Directory")
+        if d:
+            self.output_dir_edit.setText(d)
+
+    def get_config(self):
+        return {
+            "epochs": self.epochs_spin.value(),
+            "batch": self.batch_spin.value(),
+            "imgsz": self.imgsz_spin.value(),
+            "lr0": float(self.lr_edit.text() or 0.01),
+            "train_split": self.train_split_spin.value() / 100.0,
+            "output_dir": self.output_dir_edit.text()
+        }
+
+
+class YoloTrainWorker(QThread):
+    finished = pyqtSignal(bool, str)
+    progress = pyqtSignal(str)
+
+    def __init__(self, weights_path, data_yaml, config):
+        super().__init__()
+        self.weights_path = weights_path
+        self.data_yaml = data_yaml
+        self.config = config
+
+    def run(self):
+        try:
+            from ultralytics import YOLO
+            import torch
+            
+            self.progress.emit("Loading model...")
+            model = YOLO(self.weights_path)
+            
+            self.progress.emit(f"Starting training for {self.config['epochs']} epochs...")
+            # Note: project and name combined determine save dir
+            results = model.train(
+                data=self.data_yaml,
+                epochs=self.config['epochs'],
+                imgsz=self.config['imgsz'],
+                batch=self.config['batch'],
+                lr0=self.config['lr0'],
+                device='cuda' if torch.cuda.is_available() else 'cpu',
+                project=self.config['output_dir'],
+                name='train_run'
+            )
+            self.finished.emit(True, f"Training complete. Results saved to {results.save_dir}")
+        except Exception as e:
+            self.finished.emit(False, str(e))
 
 
 class HOIWindow(FrameControlMixin, QWidget):
@@ -213,6 +315,8 @@ class HOIWindow(FrameControlMixin, QWidget):
         self.file_menu.addSeparator()
         self.file_menu.addAction("Save HOI Annotations...", self._save_annotations_json)
         self.file_menu.addAction("Export Hands XML...", self._save_hands_xml)
+        self.file_menu.addSeparator()
+        self.file_menu.addAction("YOLO Incremental Training...", self._incremental_train_yolo)
         self.btn_file_menu = QToolButton()
         self.btn_file_menu.setText("Files")
         self.btn_file_menu.setPopupMode(QToolButton.InstantPopup)
@@ -1793,8 +1897,44 @@ class HOIWindow(FrameControlMixin, QWidget):
                 self, "Loaded", f"Loaded {len(self.class_map)} classes from yaml."
             )
             self._log("hoi_load_classes", path=fp, count=len(self.class_map))
+            self._sync_library_with_class_map()
         except Exception as ex:
             QMessageBox.warning(self, "Error", f"Failed to parse data.yaml:\n{ex}")
+
+    def _sync_library_with_class_map(self):
+        """Automatically add all classes from data.yaml to Instrument/Target libraries."""
+        if not self.class_map:
+            return
+
+        added_count = 0
+        for cid, class_name in self.class_map.items():
+            norm_name = self._norm_category(class_name)
+            if norm_name in ("left_hand", "right_hand"):
+                continue
+
+            existing_match = None
+            for name in self.global_object_map.keys():
+                if self._norm_category(name) == norm_name:
+                    existing_match = name
+                    break
+
+            if not existing_match:
+                uid = self.object_id_counter
+                self.global_object_map[class_name] = uid
+                self.id_to_category[class_name] = class_name
+                self.object_id_counter += 1
+
+                display_text = f"[{uid}] {class_name}"
+                self.combo_instrument.addItem(display_text, uid)
+                self.combo_target.addItem(display_text, uid)
+                added_count += 1
+
+        if added_count > 0:
+            QMessageBox.information(
+                self,
+                "Sync Complete",
+                f"Added {added_count} new classes from YOLO model to the object library.",
+            )
 
     def _load_verbs_txt(self):
         """Import verb list txt with duplication check"""
@@ -2411,6 +2551,151 @@ class HOIWindow(FrameControlMixin, QWidget):
             self._refresh_boxes_for_frame(orig_frame)
             self._update_overlay(orig_frame)
         self._log("hoi_detect_all_action_keyframes", frames=detected_frames)
+
+    def _incremental_train_yolo(self):
+        """Main entry point for YOLO fine-tuning on current annotations."""
+        if not self.yolo_weights_path or not self.video_path:
+            QMessageBox.warning(self, "Error", "Please load both a video and a YOLO model first.")
+            return
+
+        if not self.class_map:
+             QMessageBox.warning(self, "Error", "Please load a class map (data.yaml) first.")
+             return
+
+        # 1. Ask for config
+        dlg = YoloTrainDialog(self)
+        if dlg.exec_() != QDialog.Accepted:
+            return
+        config = dlg.get_config()
+
+        # 2. Prepare dataset
+        try:
+            yaml_path = self._prepare_yolo_dataset(config)
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to prepare dataset:\n{e}")
+            return
+
+        # 3. Start training
+        self._log("hoi_yolo_train_start", weights=self.yolo_weights_path, config=config)
+        self.train_worker = YoloTrainWorker(self.yolo_weights_path, yaml_path, config)
+        self.train_worker.progress.connect(self._on_train_progress)
+        self.train_worker.finished.connect(self._on_train_finished)
+        
+        self.train_progress_dlg = QMessageBox(self)
+        self.train_progress_dlg.setWindowTitle("YOLO Training")
+        self.train_progress_dlg.setText("Initializing training...")
+        self.train_progress_dlg.setStandardButtons(QMessageBox.NoButton)
+        self.train_progress_dlg.show()
+        
+        self.train_worker.start()
+
+    def _prepare_yolo_dataset(self, config):
+        """Harvest frames and boxes from raw_boxes to create a YOLO dataset."""
+        import shutil
+        import random
+        
+        base_dir = config["output_dir"]
+        os.makedirs(base_dir, exist_ok=True)
+        
+        # YOLO structure
+        img_train = os.path.join(base_dir, "images", "train")
+        img_val = os.path.join(base_dir, "images", "val")
+        lbl_train = os.path.join(base_dir, "labels", "train")
+        lbl_val = os.path.join(base_dir, "labels", "val")
+        
+        for d in [img_train, img_val, lbl_train, lbl_val]:
+            if os.path.exists(d):
+                try:
+                    shutil.rmtree(d)
+                except Exception:
+                    pass
+            os.makedirs(d, exist_ok=True)
+
+        # Reverse class map: normalized_name -> cid
+        name_to_cid = {self._norm_category(v): k for k, v in self.class_map.items()}
+        
+        # Collect frames to export (matching annotated objects with class_map)
+        frame_to_boxes = {}
+        for b in self.raw_boxes:
+            if self._is_hand_label(b.get("label")):
+                continue
+            
+            lbl = self._norm_category(b.get("label", ""))
+            if lbl not in name_to_cid:
+                continue
+            
+            f = b.get("orig_frame")
+            if f not in frame_to_boxes:
+                frame_to_boxes[f] = []
+            frame_to_boxes[f].append(b)
+        
+        if not frame_to_boxes:
+            raise Exception("No annotated objects found in your library that match classes in data.yaml.\n"
+                            "Check if names match exactly (ignoring case/underscores).")
+
+        # Export frames
+        cap = cv2.VideoCapture(self.video_path)
+        frame_indices = list(frame_to_boxes.keys())
+        random.shuffle(frame_indices)
+        
+        split_idx = int(len(frame_indices) * config["train_split"])
+        train_frames = frame_indices[:split_idx]
+        
+        for fidx in frame_indices:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, fidx)
+            ret, frame = cap.read()
+            if not ret: continue
+            
+            h, w = frame.shape[:2]
+            subset = "train" if fidx in train_frames else "val"
+            
+            img_filename = f"frame_{fidx}.jpg"
+            img_path = os.path.join(base_dir, "images", subset, img_filename)
+            lbl_path = os.path.join(base_dir, "labels", subset, f"frame_{fidx}.txt")
+            
+            cv2.imwrite(img_path, frame)
+            
+            with open(lbl_path, "w") as f_lbl:
+                for b in frame_to_boxes[fidx]:
+                    lbl = self._norm_category(b.get("label", ""))
+                    cid = name_to_cid[lbl]
+                    # Normalized YOLO: xc yc w h
+                    bx1, by1, bx2, by2 = b["x1"], b["y1"], b["x2"], b["y2"]
+                    bw = (bx2 - bx1) / w
+                    bh = (by2 - by1) / h
+                    bxc = (bx1 + bx2) / (2 * w)
+                    byc = (by1 + by2) / (2 * h)
+                    f_lbl.write(f"{cid} {bxc:.6f} {byc:.6f} {bw:.6f} {bh:.6f}\n")
+        
+        cap.release()
+        
+        # Generate dataset.yaml
+        yaml_content = {
+            "path": os.path.abspath(base_dir),
+            "train": "images/train",
+            "val": "images/val",
+            "names": {int(k): v for k, v in self.class_map.items()}
+        }
+        yaml_path = os.path.join(base_dir, "dataset.yaml")
+        with open(yaml_path, "w") as f_yaml:
+            yaml.dump(yaml_content, f_yaml, sort_keys=False)
+            
+        return yaml_path
+
+    def _on_train_progress(self, msg):
+        if hasattr(self, "train_progress_dlg") and self.train_progress_dlg:
+            self.train_progress_dlg.setText(msg)
+
+    def _on_train_finished(self, success, message):
+        if hasattr(self, "train_progress_dlg") and self.train_progress_dlg:
+            self.train_progress_dlg.close()
+        
+        if success:
+            self._log("hoi_yolo_train_finished", success=True)
+            QMessageBox.information(self, "Training Finished", message)
+        else:
+            self._log("hoi_yolo_train_finished", success=False, error=message)
+            QMessageBox.critical(self, "Training Error", f"Training failed:\n{message}")
 
     def _detect_current_frame_combined(self):
         """Run YOLO object detection and MediaPipe hand detection on the current frame."""
@@ -3493,7 +3778,24 @@ class HOIWindow(FrameControlMixin, QWidget):
                 if not line or line.startswith("#"):
                     continue
                 pending_lines.append(line)
-                if line.startswith("names"):
+                if line.startswith("names:"):
+                    # Try to parse inline content
+                    content = line[len("names:") :].strip()
+                    if content.startswith("[") and content.endswith("]"):
+                        items = content[1:-1].split(",")
+                        for idx, itm in enumerate(items):
+                            out[idx] = itm.strip().strip("'\"")
+                        return out
+                    if content.startswith("{") and content.endswith("}"):
+                        pairs = content[1:-1].split(",")
+                        for p in pairs:
+                            if ":" in p:
+                                k, v = p.split(":", 1)
+                                try:
+                                    out[int(k.strip())] = v.strip().strip("'\"")
+                                except Exception:
+                                    pass
+                        return out
                     in_names = True
                     continue
                 if in_names:
