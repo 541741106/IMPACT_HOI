@@ -66,6 +66,12 @@ class HOIWindow(FrameControlMixin, QWidget):
     - Overlay bboxes on video; show current-frame boxes in a list.
     - Define verbs via LabelPanel; select two boxes + a verb to create/delete relations.
     """
+    extra_label_config = {
+        "title": "Hand Anomaly Label",
+        "default_label": "Normal",
+        "labels": ["Normal"],
+        "rules": {}
+    }
 
     def __init__(
         self,
@@ -76,6 +82,31 @@ class HOIWindow(FrameControlMixin, QWidget):
         logger: OperationLogger = None,
     ):
         super().__init__(parent)
+        # --- Customizable Extra Label Module (Default: Hand Anomaly) ---
+        self.extra_label_config = {
+            "title": "Hand Anomaly Label",
+            "default_label": "Normal",
+            "labels": [
+                "Visibility / Occlusion",
+                "Handling Anomaly",
+                "Tool Anomaly",
+                "Part Mismatch",
+                "Spatial Anomaly",
+                "Temporal Anomaly",
+                "Quality / Outcome-visible Defect",
+                "Completion / Finish Missing",
+                "Detach / Fall-out",
+                "Recovery / Rework",
+                "Normal",
+            ],
+            "rules": {
+                "Visibility / Occlusion": {
+                    "allow_missing_bbox": True,
+                    "allow_missing_verb": True,
+                }
+            },
+        }
+
         self.setFocusPolicy(Qt.StrongFocus)
         self.setWindowTitle("HandOI / HOI Detection")
         self.resize(1100, 720)
@@ -331,20 +362,9 @@ class HOIWindow(FrameControlMixin, QWidget):
         right_col.addWidget(QLabel("Objects (current frame):"))
         right_col.addWidget(self.list_objects, 2)
 
-        self.group_anomaly = QGroupBox("Hand Anomaly Label")
-        self.anomaly_labels = [
-            "Visibility / Occlusion",
-            "Handling Anomaly",
-            "Tool Anomaly",
-            "Part Mismatch",
-            "Spatial Anomaly",
-            "Temporal Anomaly",
-            "Quality / Outcome-visible Defect",
-            "Completion / Finish Missing",
-            "Detach / Fall-out",
-            "Recovery / Rework",
-            "Normal",
-        ]
+        # --- Customizable Extra Label Module UI setup moved to top of __init__ ---
+        self.group_anomaly = QGroupBox(self.extra_label_config.get("title", "Hand Anomaly Label"))
+        self.anomaly_labels = list(self.extra_label_config.get("labels", []))
         self.anomaly_rules = {}
         self._init_anomaly_rules()
         self.anomaly_list = ClickToggleList()
@@ -362,16 +382,20 @@ class HOIWindow(FrameControlMixin, QWidget):
         self.anomaly_list.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self._anomaly_block = False
         for name in self.anomaly_labels:
-            self._add_anomaly_item(name, checked=(name.strip().lower() == "normal"))
+            self._add_anomaly_item(name, checked=(name.strip().lower() == self.extra_label_config.get("default_label", "Normal").strip().lower()))
 
         self.anomaly_edit = QLineEdit(self.group_anomaly)
         self.anomaly_edit.setPlaceholderText("New label")
         self.btn_anomaly_add = QPushButton("Add")
         self.btn_anomaly_remove = QPushButton("Remove")
         self.btn_anomaly_rules = QPushButton("Rules")
+        self.btn_anomaly_rename = QPushButton("Rename")
+        self.btn_anomaly_rename_item = QPushButton("Rename Label")
         self.btn_anomaly_add.clicked.connect(self._add_anomaly_label)
+        self.btn_anomaly_rename_item.clicked.connect(self._rename_anomaly_label)
         self.btn_anomaly_remove.clicked.connect(self._remove_anomaly_label)
         self.btn_anomaly_rules.clicked.connect(self._edit_anomaly_rules)
+        self.btn_anomaly_rename.clicked.connect(self._rename_anomaly_module)
 
         anomaly_layout = QVBoxLayout()
         anomaly_layout.addWidget(self.anomaly_list)
@@ -380,6 +404,8 @@ class HOIWindow(FrameControlMixin, QWidget):
         row.addWidget(self.btn_anomaly_add)
         row.addWidget(self.btn_anomaly_remove)
         row.addWidget(self.btn_anomaly_rules)
+        row.addWidget(self.btn_anomaly_rename)
+        row.addWidget(self.btn_anomaly_rename_item)
         anomaly_layout.addLayout(row)
         self.group_anomaly.setLayout(anomaly_layout)
 
@@ -990,7 +1016,7 @@ class HOIWindow(FrameControlMixin, QWidget):
             "interaction_start": None,
             "functional_contact_onset": None,
             "interaction_end": None,
-            "anomaly_label": "Normal",
+            "anomaly_label": self.extra_label_config.get("default_label", "Normal"),
         }
 
     def _on_hoi_timeline_select(self, event_id: int, hand_key: str):
@@ -1008,7 +1034,7 @@ class HOIWindow(FrameControlMixin, QWidget):
         h["interaction_end"] = int(end)
         h["functional_contact_onset"] = int(onset)
         if h.get("anomaly_label") in (None, ""):
-            h["anomaly_label"] = "Normal"
+            h["anomaly_label"] = self.extra_label_config.get("default_label", "Normal")
         self._sync_event_frames(ev)
         if self.selected_event_id == event_id:
             self.event_draft[hand_key] = dict(h)
@@ -1047,7 +1073,7 @@ class HOIWindow(FrameControlMixin, QWidget):
         hand_data["interaction_end"] = int(end)
         hand_data["functional_contact_onset"] = int(onset)
         if hand_data.get("anomaly_label") in (None, ""):
-            hand_data["anomaly_label"] = "Normal"
+            hand_data["anomaly_label"] = self.extra_label_config.get("default_label", "Normal")
         self._sync_event_frames(new_event)
         self.events.append(new_event)
         self.event_id_counter += 1
@@ -2652,14 +2678,13 @@ class HOIWindow(FrameControlMixin, QWidget):
 
     def _init_anomaly_rules(self):
         self.anomaly_rules = {}
+        rules_dict = self.extra_label_config.get("rules", {})
         for label in self.anomaly_labels:
+            config_rule = rules_dict.get(label, {})
             self.anomaly_rules[label] = {
-                "allow_missing_bbox": False,
-                "allow_missing_verb": False,
+                "allow_missing_bbox": config_rule.get("allow_missing_bbox", False),
+                "allow_missing_verb": config_rule.get("allow_missing_verb", False),
             }
-        if "Visibility / Occlusion" in self.anomaly_rules:
-            self.anomaly_rules["Visibility / Occlusion"]["allow_missing_bbox"] = True
-            self.anomaly_rules["Visibility / Occlusion"]["allow_missing_verb"] = True
 
     def _ensure_anomaly_rules(self):
         for label in self.anomaly_labels:
@@ -2674,24 +2699,25 @@ class HOIWindow(FrameControlMixin, QWidget):
 
     def _normalize_anomaly_label(self, label: str) -> str:
         if not label:
-            return "Normal"
+            return self.extra_label_config.get("default_label", "Normal")
         text = str(label).strip()
         if text.lower() == "correct":
-            return "Normal"
+            return self.extra_label_config.get("default_label", "Normal")
         return text
 
     def _parse_anomaly_labels(self, label_str: str) -> List[str]:
         if not label_str:
-            return ["Normal"]
+            return [self.extra_label_config.get("default_label", "Normal")]
         raw = [
             self._normalize_anomaly_label(t.strip())
             for t in str(label_str).split(",")
             if t.strip()
         ]
         if not raw:
-            return ["Normal"]
-        if "Normal" in raw and len(raw) > 1:
-            raw = [t for t in raw if t != "Normal"]
+            return [self.extra_label_config.get("default_label", "Normal")]
+        default_lbl = self.extra_label_config.get("default_label", "Normal")
+        if default_lbl in raw and len(raw) > 1:
+            raw = [t for t in raw if t != fallback]
         # preserve order, de-dupe
         seen = set()
         out = []
@@ -2875,7 +2901,7 @@ class HOIWindow(FrameControlMixin, QWidget):
             event_id = w_item.get("window_id", self.event_id_counter)
             frames = w_item.get("frames", [0, 0])
             anomalies = w_item.get("anomaly_labels", {})
-            anomaly_label = "Normal"
+            anomaly_label = self.extra_label_config.get("default_label", "Normal")
             if isinstance(anomalies, dict):
                 for k, v in anomalies.items():
                     try:
@@ -3026,6 +3052,37 @@ class HOIWindow(FrameControlMixin, QWidget):
         self.bboxes = {}
         self._clear_relation_highlight()
         self.video_path = data.get("video_path", "") or self.video_path
+
+        # Restore Extra Label Config
+        if "extra_label_config" in data:
+            self.extra_label_config = data["extra_label_config"]
+            self._apply_extra_label_config()
+        else:
+            # Revert to default Hand Anomaly config if missing
+            self.extra_label_config = {
+                "title": "Hand Anomaly Label",
+                "default_label": "Normal",
+                "labels": [
+                    "Visibility / Occlusion",
+                    "Handling Anomaly",
+                    "Tool Anomaly",
+                    "Part Mismatch",
+                    "Spatial Anomaly",
+                    "Temporal Anomaly",
+                    "Quality / Outcome-visible Defect",
+                    "Completion / Finish Missing",
+                    "Detach / Fall-out",
+                    "Recovery / Rework",
+                    "Normal",
+                ],
+                "rules": {
+                    "Visibility / Occlusion": {
+                        "allow_missing_bbox": True,
+                        "allow_missing_verb": True,
+                    }
+                },
+            }
+            self._apply_extra_label_config()
 
         # Restore libraries
         self.global_object_map.clear()
@@ -3211,7 +3268,7 @@ class HOIWindow(FrameControlMixin, QWidget):
                 "interaction_start": None,
                 "functional_contact_onset": None,
                 "interaction_end": None,
-                "anomaly_label": "Normal",
+                "anomaly_label": self.extra_label_config.get("default_label", "Normal"),
             }
             hoi_data = {"Left_hand": dict(empty), "Right_hand": dict(empty)}
             hand_key = "Left_hand" if side_key == "left_hand" else "Right_hand"
@@ -3552,12 +3609,12 @@ class HOIWindow(FrameControlMixin, QWidget):
                 s = h_data.get("interaction_start")
                 o = h_data.get("functional_contact_onset")
                 e = h_data.get("interaction_end")
-                anom = h_data.get("anomaly_label", "Normal")
+                anom = h_data.get("anomaly_label", self.extra_label_config.get("default_label", "Normal"))
 
                 has_verb = bool(verb and verb.strip())
                 has_objects = (target is not None) or (instr is not None)
                 has_timestamps = (s is not None) or (o is not None) or (e is not None)
-                is_abnormal = anom != "Normal"
+                is_abnormal = anom != self.extra_label_config.get("default_label", "Normal")
 
                 has_info = has_verb or has_objects or has_timestamps or is_abnormal
 
@@ -3673,6 +3730,7 @@ class HOIWindow(FrameControlMixin, QWidget):
             "bbox_normalized": False,
             "object_library": object_library,
             "verb_library": verb_library,
+            "extra_label_config": self.extra_label_config,
             "tracks": tracks,
             "hoi_events": events,
         }
@@ -4810,6 +4868,25 @@ class HOIWindow(FrameControlMixin, QWidget):
                 return True
         return False
 
+    def _apply_extra_label_config(self):
+        """Update the UI (group box title and list items) from self.extra_label_config."""
+        title = self.extra_label_config.get("title", "Hand Anomaly Label")
+        self.group_anomaly.setTitle(title)
+
+        self.anomaly_labels = list(self.extra_label_config.get("labels", []))
+        self._init_anomaly_rules()
+
+        self._anomaly_block = True
+        try:
+            self.anomaly_list.clear()
+            default_lbl = self.extra_label_config.get("default_label", "Normal")
+            for name in self.anomaly_labels:
+                # Default to checked if it matches the default_label
+                checked = (name.strip().lower() == default_lbl.strip().lower())
+                self._add_anomaly_item(name, checked=checked)
+        finally:
+            self._anomaly_block = False
+
     def _selected_anomaly_label(self) -> str:
         """Return checked anomaly labels as a comma-separated string."""
         selected = []
@@ -4818,16 +4895,18 @@ class HOIWindow(FrameControlMixin, QWidget):
             if it.checkState() == Qt.Checked:
                 selected.append(it.text())
         if not selected:
-            return "Normal"
-        if "Normal" in selected and len(selected) > 1:
-            selected = [t for t in selected if t != "Normal"]
+            return self.extra_label_config.get("default_label", "Normal")
+        fallback = self.extra_label_config.get("default_label", "Normal");
+        if fallback in selected and len(selected) > 1:
+            selected = [t for t in selected if t != fallback]
         return ", ".join(selected)
 
     def _set_selected_anomaly_label(self, label_str: str):
         """Parse stored label(s) and select all matching items."""
         target_keys = [t.strip().lower() for t in self._parse_anomaly_labels(label_str)]
         if not target_keys:
-            target_keys = ["normal"]
+            fallback = self.extra_label_config.get("default_label", "Normal").lower();
+            target_keys = [fallback]
         self._anomaly_block = True
         try:
             found_any = False
@@ -4840,7 +4919,7 @@ class HOIWindow(FrameControlMixin, QWidget):
                 else:
                     it.setCheckState(Qt.Unchecked)
             if not found_any:
-                self._set_anomaly_checked("Normal", True)
+                self._set_anomaly_checked(self.extra_label_config.get("default_label", "Normal"), True)
         finally:
             self._anomaly_block = False
 
@@ -4856,7 +4935,8 @@ class HOIWindow(FrameControlMixin, QWidget):
             is_checked = item.checkState() == Qt.Checked
             curr_text = item.text().strip()
             if is_checked:
-                if curr_text.lower() == "normal":
+                fallback = self.extra_label_config.get("default_label", "Normal").lower();
+                if curr_text.lower() == fallback:
                     for i in range(self.anomaly_list.count()):
                         it = self.anomaly_list.item(i)
                         if it is not item:
@@ -4864,11 +4944,12 @@ class HOIWindow(FrameControlMixin, QWidget):
                 else:
                     for i in range(self.anomaly_list.count()):
                         it = self.anomaly_list.item(i)
-                        if it.text().strip().lower() == "normal":
+                        fallback = self.extra_label_config.get("default_label", "Normal").lower();
+                        if it.text().strip().lower() == fallback:
                             it.setCheckState(Qt.Unchecked)
 
             if not self._any_anomaly_checked():
-                self._set_anomaly_checked("Normal", True)
+                self._set_anomaly_checked(self.extra_label_config.get("default_label", "Normal"), True)
 
             if (
                 self.selected_hand_label
@@ -4887,6 +4968,96 @@ class HOIWindow(FrameControlMixin, QWidget):
         finally:
             self._anomaly_block = False
 
+    def _rename_anomaly_module(self):
+        old_title = self.extra_label_config.get("title", "")
+        old_fallback = self.extra_label_config.get("default_label", "Normal")
+        new_title, ok = QInputDialog.getText(
+            self, "Rename Module", "New title:", QLineEdit.Normal, old_title
+        )
+        if ok and new_title:
+            self.extra_label_config["title"] = new_title
+            self.group_anomaly.setTitle(new_title)
+            
+            # Auto-rename Normal -> Default if title is changed from default
+            if old_title == "Hand Anomaly Label" and old_fallback == "Normal":
+                self._rename_anomaly_item_logic("Normal", "Default")
+                self.extra_label_config["default_label"] = "Default"
+                self._apply_extra_label_config()
+
+            self._log("hoi_anomaly_module_rename", title=new_title)
+
+    def _rename_anomaly_item_logic(self, old_name: str, new_name: str):
+        if "labels" in self.extra_label_config:
+            for i, l in enumerate(self.extra_label_config["labels"]):
+                if l.strip().lower() == old_name.strip().lower():
+                    self.extra_label_config["labels"][i] = new_name
+                    break
+        if self.extra_label_config.get("default_label") == old_name:
+            self.extra_label_config["default_label"] = new_name
+            
+        if "rules" in self.extra_label_config:
+            if old_name in self.extra_label_config["rules"]:
+                self.extra_label_config["rules"][new_name] = self.extra_label_config["rules"].pop(old_name)
+        
+        if hasattr(self, "anomaly_labels"):
+            for i, l in enumerate(self.anomaly_labels):
+                if l.strip().lower() == old_name.strip().lower():
+                    self.anomaly_labels[i] = new_name
+                    break
+                    
+        # Update event drafts (including the current draft)
+        for hand_label in ["Left_hand", "Right_hand"]:
+            if hand_label in self.event_draft:
+                cur = self.event_draft[hand_label].get("anomaly_label", "")
+                if cur:
+                    parts = [p.strip() for p in cur.split(",")]
+                    replaced = False
+                    for i, p in enumerate(parts):
+                        if p.lower() == old_name.lower():
+                            parts[i] = new_name
+                            replaced = True
+                    if replaced:
+                        self.event_draft[hand_label]["anomaly_label"] = ", ".join(parts)
+        
+        # Update all events
+        for ev in self.events:
+            if "hoi_data" in ev:
+                for hand_key in ["Left_hand", "Right_hand"]:
+                    cur = ev["hoi_data"].get(hand_key, {}).get("anomaly_label", "")
+                    if cur:
+                        parts = [p.strip() for p in cur.split(",")]
+                        replaced = False
+                        for i, p in enumerate(parts):
+                            if p.lower() == old_name.lower():
+                                parts[i] = new_name
+                                replaced = True
+                        if replaced:
+                            ev["hoi_data"][hand_key]["anomaly_label"] = ", ".join(parts)
+        
+        # Refresh UI
+        self._apply_extra_label_config()
+
+    def _rename_anomaly_label(self):
+        # ClickToggleList is in NoSelection mode; use currentItem or first checked item
+        item = self.anomaly_list.currentItem()
+        if not item:
+            for i in range(self.anomaly_list.count()):
+                it = self.anomaly_list.item(i)
+                if it.checkState() == Qt.Checked:
+                    item = it
+                    break
+        if not item:
+            QMessageBox.information(self, "Info", "Please select or check a label to rename.")
+            return
+
+        old_name = item.text().strip()
+        new_name, ok = QInputDialog.getText(
+            self, "Rename Label", "New label name:", QLineEdit.Normal, old_name
+        )
+        if ok and new_name and new_name != old_name:
+            self._rename_anomaly_item_logic(old_name, new_name)
+            self._log("hoi_anomaly_label_rename", old=old_name, new=new_name)
+
     def _add_anomaly_label(self):
         name = self.anomaly_edit.text().strip()
         if not name:
@@ -4897,6 +5068,10 @@ class HOIWindow(FrameControlMixin, QWidget):
             return
         self._add_anomaly_item(name, checked=False)
         self.anomaly_labels.append(name)
+        if "labels" not in self.extra_label_config:
+            self.extra_label_config["labels"] = []
+        if name not in self.extra_label_config["labels"]:
+            self.extra_label_config["labels"].append(name)
         self._ensure_anomaly_rules()
         self.anomaly_edit.clear()
         self._log("hoi_anomaly_add", name=name)
@@ -4911,9 +5086,10 @@ class HOIWindow(FrameControlMixin, QWidget):
             return
         item = checked_items[0]
         name = item.text().strip().lower()
-        if name == "normal":
+        default_lbl = self.extra_label_config.get("default_label", "Normal")
+        if name == default_lbl.lower():
             QMessageBox.information(
-                self, "Info", "The 'Normal' label cannot be removed."
+                self, "Info", f"The '{default_lbl}' label cannot be removed."
             )
             return
         row = self.anomaly_list.row(item)
@@ -4921,10 +5097,15 @@ class HOIWindow(FrameControlMixin, QWidget):
         for label in list(self.anomaly_labels):
             if label.strip().lower() == name:
                 self.anomaly_labels.remove(label)
+                if "labels" in self.extra_label_config:
+                    for l in list(self.extra_label_config["labels"]):
+                        if l.strip().lower() == name:
+                            self.extra_label_config["labels"].remove(l)
+                            break
                 break
         self._ensure_anomaly_rules()
         if not self._any_anomaly_checked():
-            self._set_selected_anomaly_label("Normal")
+            self._set_selected_anomaly_label(self.extra_label_config.get("default_label", "Normal"))
         if self.selected_hand_label and self.selected_hand_label in self.event_draft:
             self.event_draft[self.selected_hand_label][
                 "anomaly_label"
@@ -5308,7 +5489,7 @@ class HOIWindow(FrameControlMixin, QWidget):
                 "interaction_start": None,
                 "functional_contact_onset": None,
                 "interaction_end": None,
-                "anomaly_label": "Normal",
+                "anomaly_label": self.extra_label_config.get("default_label", "Normal"),
             },
             "Right_hand": {
                 "verb": "",
@@ -5317,13 +5498,13 @@ class HOIWindow(FrameControlMixin, QWidget):
                 "interaction_start": None,
                 "functional_contact_onset": None,
                 "interaction_end": None,
-                "anomaly_label": "Normal",
+                "anomaly_label": self.extra_label_config.get("default_label", "Normal"),
             },
         }
         if hasattr(self, "lbl_event_status"):
             self.lbl_event_status.setText("No event selected.")
         if hasattr(self, "anomaly_list"):
-            self._set_selected_anomaly_label("Normal")
+            self._set_selected_anomaly_label(self.extra_label_config.get("default_label", "Normal"))
 
     def _save_ui_to_hand_draft(self, hand_label: str):
         """[Restore] Save UI to draft using COMBO BOX."""
@@ -5419,7 +5600,7 @@ class HOIWindow(FrameControlMixin, QWidget):
             self.combo_instrument.blockSignals(False)
             self.combo_target.blockSignals(False)
 
-        anomaly = hand_data.get("anomaly_label", "correct")
+        anomaly = hand_data.get("anomaly_label", self.extra_label_config.get("default_label", "Normal"))
         self._set_selected_anomaly_label(anomaly)
 
         self._update_status_label()
