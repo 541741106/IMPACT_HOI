@@ -120,6 +120,12 @@ class HOIWindow(FrameControlMixin, QWidget):
         self.player.on_frame_advanced = self._on_frame_advanced
         self.player.on_playback_state_changed = self._on_player_playback_state_changed
 
+        # --- Customizable Actor Module (Default: Left/Right Hand) ---
+        self.actors_config = [
+            {"id": "Left_hand", "label": "Left Hand", "short": "L"},
+            {"id": "Right_hand", "label": "Right Hand", "short": "R"},
+        ]
+
         # data
         self.bboxes: Dict[int, List[dict]] = {}  # frame -> list of boxes
         self.box_id_counter = 1
@@ -133,8 +139,8 @@ class HOIWindow(FrameControlMixin, QWidget):
         self.start_offset = 0
         self.end_frame = None  # optional clamp
         self.raw_boxes: List[dict] = []  # keep raw frame indices for re-mapping
-        self.current_hands = {"Left_hand": None, "Right_hand": None}
-        self.selected_hand_label = None  # "Left_hand"|"Right_hand"|None
+        self.current_hands = {actor["id"]: None for actor in self.actors_config}
+        self.selected_hand_label = None  # Current active actor ID
         self.selected_event_id = None
         self._required_loaded = False
         self.video_path = ""
@@ -410,19 +416,22 @@ class HOIWindow(FrameControlMixin, QWidget):
         self.group_anomaly.setLayout(anomaly_layout)
 
         hand_row = QHBoxLayout()
-        hand_row.addWidget(QLabel("Hands:"))
-        self.chk_left = QCheckBox("L")
-        self.chk_left.setToolTip("Left hand")
-        self.chk_right = QCheckBox("R")
-        self.chk_right.setToolTip("Right hand")
-        self.chk_left.toggled.connect(lambda on: self._select_hand("Left_hand", on))
-        self.chk_right.toggled.connect(lambda on: self._select_hand("Right_hand", on))
-        hand_row.addWidget(self.chk_left)
-        hand_row.addWidget(self.chk_right)
+        hand_row.addWidget(QLabel("Actors:"))
+        
+        self.actor_layout = QHBoxLayout()
+        hand_row.addLayout(self.actor_layout)
+        
+        self.actor_controls = {}
+        self._rebuild_actor_checkboxes()
+
+        self.btn_config_actors = QPushButton("Config")
+        self.btn_config_actors.setToolTip("Configure actors (Add/Remove/Rename)")
+        self.btn_config_actors.clicked.connect(self._on_configure_actors)
+        hand_row.addWidget(self.btn_config_actors)
 
         self.btn_swap_draft = QPushButton("Swap")
         self.btn_swap_draft.setToolTip(
-            "Swap Left/Right hand boxes on the current frame."
+            "Swap actor boxes on the current frame (first two actors)."
         )
         self.btn_swap_draft.setStyleSheet("color: #111;")
         self.btn_swap_draft.clicked.connect(self._swap_frame_hands)
@@ -498,6 +507,7 @@ class HOIWindow(FrameControlMixin, QWidget):
             get_frame_count=lambda: int(self.player.frame_count or 0),
             get_fps=lambda: int(self.player.frame_rate or 30),
             get_title_for_hand=self._hoi_title_for_hand,
+            actors_config=self.actors_config,
             parent=self,
         )
         self.lbl_incomplete = QLabel("Incomplete: n/a")
@@ -790,7 +800,8 @@ class HOIWindow(FrameControlMixin, QWidget):
 
     def _compute_event_frames(self, event: dict) -> tuple:
         times = []
-        for hand in ("Left_hand", "Right_hand"):
+        for actor in self.actors_config:
+            hand = actor["id"]
             h = event.get("hoi_data", {}).get(hand, {})
             for key in (
                 "interaction_start",
@@ -817,10 +828,7 @@ class HOIWindow(FrameControlMixin, QWidget):
         ev = self._find_event_by_id(self.selected_event_id)
         if not ev:
             return
-        ev["hoi_data"] = {
-            "Left_hand": dict(self.event_draft.get("Left_hand", {})),
-            "Right_hand": dict(self.event_draft.get("Right_hand", {})),
-        }
+        ev["hoi_data"] = {aid: dict(data) for aid, data in self.event_draft.items()}
         self._sync_event_frames(ev)
 
     def _apply_selected_event(self):
@@ -843,27 +851,30 @@ class HOIWindow(FrameControlMixin, QWidget):
         if not ev:
             return
         self._sync_event_frames(ev)
-        self.selected_event_id = event_id
+        self.event_id_counter = max(self.event_id_counter, event_id + 1)
         self.event_draft = {
-            "Left_hand": dict(ev.get("hoi_data", {}).get("Left_hand", {})),
-            "Right_hand": dict(ev.get("hoi_data", {}).get("Right_hand", {})),
+            actor["id"]: dict(ev.get("hoi_data", {}).get(actor["id"], {}))
+            for actor in self.actors_config
         }
 
-        if hand_key not in ("Left_hand", "Right_hand"):
-            hand_key = (
-                "Left_hand"
-                if ev.get("hoi_data", {}).get("Left_hand", {}).get("interaction_start")
-                is not None
-                else "Right_hand"
-            )
+        actor_ids = [a["id"] for a in self.actors_config]
+        if hand_key not in actor_ids:
+            hand_key = actor_ids[0]
+            for aid in actor_ids:
+                if (
+                    ev.get("hoi_data", {})
+                    .get(aid, {})
+                    .get("interaction_start")
+                    is not None
+                ):
+                    hand_key = aid
+                    break
         self.selected_hand_label = hand_key
 
-        self.chk_left.blockSignals(True)
-        self.chk_right.blockSignals(True)
-        self.chk_left.setChecked(hand_key == "Left_hand")
-        self.chk_right.setChecked(hand_key == "Right_hand")
-        self.chk_left.blockSignals(False)
-        self.chk_right.blockSignals(False)
+        for aid, chk in self.actor_controls.items():
+            chk.blockSignals(True)
+            chk.setChecked(aid == hand_key)
+            chk.blockSignals(False)
 
         self._load_hand_draft_to_ui(hand_key)
         self._update_status_label()
@@ -934,8 +945,8 @@ class HOIWindow(FrameControlMixin, QWidget):
         ev.get("hoi_data", {})[hand_key] = self._blank_hand_data()
         self._sync_event_frames(ev)
 
-        if not self._hand_has_segment(ev, "Left_hand") and not self._hand_has_segment(
-            ev, "Right_hand"
+        if not any(
+            self._hand_has_segment(ev, actor["id"]) for actor in self.actors_config
         ):
             if ev in self.events:
                 self.events.remove(ev)
@@ -950,7 +961,9 @@ class HOIWindow(FrameControlMixin, QWidget):
                 self.selected_event_id == event_id
                 and self.selected_hand_label == hand_key
             ):
-                other = "Right_hand" if hand_key == "Left_hand" else "Left_hand"
+                # Find 'other' actor(s) for swap logic
+                others = [a["id"] for a in self.actors_config if a["id"] != hand_key]
+                other = others[0] if others else hand_key
                 if self._hand_has_segment(ev, other):
                     self._set_selected_event(event_id, other)
                 else:
@@ -964,8 +977,21 @@ class HOIWindow(FrameControlMixin, QWidget):
             self.hoi_timeline.refresh()
         self._log("hoi_segment_delete", event_id=event_id, hand=hand_key)
 
+    def _get_actor_short_label(self, actor_id: str) -> str:
+        """Helper for timeline titles."""
+        for a in self.actors_config:
+            if a["id"] == actor_id:
+                return a.get("short", actor_id[:1])
+        return actor_id[:1]
+
+    def _get_actor_full_label(self, actor_id: str) -> str:
+        for a in self.actors_config:
+            if a["id"] == actor_id:
+                return a.get("label", actor_id)
+        return actor_id
+
     def _hoi_title_for_hand(self, hand_key: str) -> str:
-        base = "L" if hand_key == "Left_hand" else "R"
+        base = self._get_actor_short_label(hand_key)
         if self.selected_event_id is None:
             return base
         ev = self._find_event_by_id(self.selected_event_id)
@@ -1062,10 +1088,7 @@ class HOIWindow(FrameControlMixin, QWidget):
         new_event = {
             "event_id": self.event_id_counter,
             "frames": [start, end],
-            "hoi_data": {
-                "Left_hand": self._blank_hand_data(),
-                "Right_hand": self._blank_hand_data(),
-            },
+            "hoi_data": {actor["id"]: self._blank_hand_data() for actor in self.actors_config},
         }
         hand_data = new_event["hoi_data"][hand_key]
         hand_data.update(self._current_hand_meta())
@@ -1245,14 +1268,33 @@ class HOIWindow(FrameControlMixin, QWidget):
         if label is None:
             return None
         norm = str(label).strip().lower().replace(" ", "_")
-        if norm in ("left_hand", "left", "l_hand"):
-            return "Left_hand"
-        if norm in ("right_hand", "right", "r_hand"):
-            return "Right_hand"
+        for actor in self.actors_config:
+            aid = actor["id"]
+            if norm == aid.lower():
+                return aid
+            if norm in (
+                actor.get("short", "").lower(),
+                actor.get("label", "").lower(),
+            ):
+                return aid
+        # Fallbacks for very common terms
+        if norm in ("left", "l_hand"):
+            for actor in self.actors_config:
+                if "left" in actor["id"].lower():
+                    return actor["id"]
+            return self.actors_config[0]["id"]
+        if norm in ("right", "r_hand"):
+            for actor in self.actors_config:
+                if "right" in actor["id"].lower():
+                    return actor["id"]
+            return self.actors_config[1]["id"] if len(self.actors_config) > 1 else self.actors_config[0]["id"]
         return None
 
     def _is_hand_label(self, label: str) -> bool:
-        return self._normalize_hand_label(label) in ("Left_hand", "Right_hand")
+        if not label:
+            return False
+        l_str = str(label).strip()
+        return any(actor["id"] == l_str for actor in self.actors_config)
 
     def _color_for_index(self, idx: int) -> str:
         """Pick a non-gray preset color cycling through the palette."""
@@ -1285,7 +1327,7 @@ class HOIWindow(FrameControlMixin, QWidget):
             has_hand = any(
                 b
                 for b in self.raw_boxes
-                if b.get("label") in ("Left_hand", "Right_hand")
+                if self._is_hand_label(b.get("label"))
             )
             if not has_hand:
                 missing.append("hand bboxes (XML)")
@@ -1338,12 +1380,10 @@ class HOIWindow(FrameControlMixin, QWidget):
         self._refresh_boxes_for_frame(frame)
         self._set_frame_controls(frame)
 
-        self.chk_left.blockSignals(True)
-        self.chk_right.blockSignals(True)
-        self.chk_left.setChecked(self.selected_hand_label == "Left_hand")
-        self.chk_right.setChecked(self.selected_hand_label == "Right_hand")
-        self.chk_left.blockSignals(False)
-        self.chk_right.blockSignals(False)
+        for aid, chk in self.actor_controls.items():
+            chk.blockSignals(True)
+            chk.setChecked(self.selected_hand_label == aid)
+            chk.blockSignals(False)
 
         if self.selected_hand_label:
             self._load_hand_draft_to_ui(self.selected_hand_label)
@@ -1716,12 +1756,12 @@ class HOIWindow(FrameControlMixin, QWidget):
         has_existing_objects = any(
             b
             for b in self.raw_boxes
-            if b.get("label") not in ("Left_hand", "Right_hand")
+            if not self._is_hand_label(b.get("label"))
         )
         if new_raw_boxes or has_existing_objects:
             self._push_undo()
         self.raw_boxes = [
-            b for b in self.raw_boxes if b.get("label") in ("Left_hand", "Right_hand")
+            b for b in self.raw_boxes if self._is_hand_label(b.get("label"))
         ]
         self.raw_boxes.extend(new_raw_boxes)
 
@@ -2136,29 +2176,33 @@ class HOIWindow(FrameControlMixin, QWidget):
             x2 = max(0.0, min(float(w), max(xs) * w))
             y2 = max(0.0, min(float(h), max(ys) * h))
 
+            a1 = self.actors_config[0]["id"]
+            a2 = self.actors_config[1]["id"] if len(self.actors_config) > 1 else a1
+            
             label = None
             if idx < len(handedness) and handedness[idx]:
-                if str(handedness[idx]).lower().startswith("left"):
-                    label = "Left_hand"
-                elif str(handedness[idx]).lower().startswith("right"):
-                    label = "Right_hand"
+                h_low = str(handedness[idx]).lower()
+                if h_low.startswith("left"):
+                    label = self._normalize_hand_label("left")
+                elif h_low.startswith("right"):
+                    label = self._normalize_hand_label("right")
             if label is None:
-                label = "Left_hand" if "Left_hand" not in used else "Right_hand"
+                label = a1 if a1 not in used else a2
             if label in used:
-                other = "Right_hand" if label == "Left_hand" else "Left_hand"
+                other = a2 if label == a1 else a1
                 if other not in used:
                     label = other
                 else:
                     continue
-            if self.mp_hands_swap and label in ("Left_hand", "Right_hand"):
-                label = "Right_hand" if label == "Left_hand" else "Left_hand"
+            if self.mp_hands_swap:
+                label = a2 if label == a1 else a1
             if label in used:
-                other = "Right_hand" if label == "Left_hand" else "Left_hand"
+                other = a2 if label == a1 else a1
                 if other not in used:
                     label = other
                 else:
                     continue
-            if label in used and "Left_hand" in used and "Right_hand" in used:
+            if label in used and all(a["id"] in used for a in self.actors_config[:2]):
                 continue
             used.add(label)
             boxes.append((label, x1, y1, x2, y2))
@@ -2221,7 +2265,8 @@ class HOIWindow(FrameControlMixin, QWidget):
             return
         keyframes = set()
         active_ids = set()
-        for hand_key in ("Left_hand", "Right_hand"):
+        for actor in self.actors_config:
+            hand_key = actor["id"]
             hand_data = ev.get("hoi_data", {}).get(hand_key, {}) or {}
             for key in (
                 "interaction_start",
@@ -2303,7 +2348,8 @@ class HOIWindow(FrameControlMixin, QWidget):
 
         frame_to_active_ids = {}
         for ev in self.events:
-            for hand_key in ("Left_hand", "Right_hand"):
+            for actor in self.actors_config:
+                hand_key = actor["id"]
                 hand_data = ev.get("hoi_data", {}).get(hand_key, {}) or {}
                 keyframes = set()
                 for key in (
@@ -2420,7 +2466,8 @@ class HOIWindow(FrameControlMixin, QWidget):
 
             for i, event in enumerate(self.events):
                 event_id = event["event_id"]
-                for hand_key in ["Left_hand", "Right_hand"]:
+                for actor in self.actors_config:
+                    hand_key = actor["id"]
                     h_data = event["hoi_data"][hand_key]
 
                     has_intent = (
@@ -2505,7 +2552,8 @@ class HOIWindow(FrameControlMixin, QWidget):
         issues = []
         for ev in self.events:
             ev_id = ev.get("event_id")
-            for hand_key in ("Left_hand", "Right_hand"):
+            for actor in self.actors_config:
+                hand_key = actor["id"]
                 h_data = ev.get("hoi_data", {}).get(hand_key, {}) or {}
                 start = h_data.get("interaction_start")
                 end = h_data.get("interaction_end")
@@ -2566,9 +2614,9 @@ class HOIWindow(FrameControlMixin, QWidget):
             return True, False
         preview = []
         for entry in issues[:4]:
-            hand = "L" if entry["hand"] == "Left_hand" else "R"
+            hand_short = self._get_actor_short_label(entry["hand"])
             missing = ", ".join(entry["missing"])
-            preview.append(f"Event {entry['event_id']} {hand}: {missing}")
+            preview.append(f"Event {entry['event_id']} {hand_short}: {missing}")
         if len(issues) > 4:
             preview.append(f"... and {len(issues) - 4} more")
         msg = (
@@ -2606,7 +2654,7 @@ class HOIWindow(FrameControlMixin, QWidget):
         self.lbl_incomplete.setText(f"Incomplete: {len(issues)}")
         tooltip = []
         for entry in issues[:6]:
-            hand = "L" if entry["hand"] == "Left_hand" else "R"
+            hand = self._get_actor_short_label(entry["hand"])
             missing = ", ".join(entry["missing"])
             tooltip.append(f"Event {entry['event_id']} {hand}: {missing}")
         if len(issues) > 6:
@@ -2631,7 +2679,7 @@ class HOIWindow(FrameControlMixin, QWidget):
         self._set_frame_controls(frame)
         event_id = issue.get("event_id")
         hand = issue.get("hand")
-        if event_id is not None and hand in ("Left_hand", "Right_hand"):
+        if event_id is not None and self._is_hand_label(hand):
             self._set_selected_event(event_id, hand)
         if getattr(self, "hoi_timeline", None):
             self.hoi_timeline.set_current_frame(frame)
@@ -2915,7 +2963,7 @@ class HOIWindow(FrameControlMixin, QWidget):
                 self.event_id_counter = event_id + 1
 
             hoi_data = {
-                "Left_hand": {
+                actor["id"]: {
                     "verb": "",
                     "instrument_object_id": None,
                     "target_object_id": None,
@@ -2923,16 +2971,8 @@ class HOIWindow(FrameControlMixin, QWidget):
                     "functional_contact_onset": None,
                     "interaction_end": None,
                     "anomaly_label": anomaly_label,
-                },
-                "Right_hand": {
-                    "verb": "",
-                    "instrument_object_id": None,
-                    "target_object_id": None,
-                    "interaction_start": None,
-                    "functional_contact_onset": None,
-                    "interaction_end": None,
-                    "anomaly_label": anomaly_label,
-                },
+                }
+                for actor in self.actors_config
             }
 
             # B. Parse Hands
@@ -2944,11 +2984,11 @@ class HOIWindow(FrameControlMixin, QWidget):
                 box_label = None
 
                 if "left" in hid_str:
-                    internal_key = "Left_hand"
-                    box_label = "Left_hand"
+                    internal_key = self.actors_config[0]["id"]
+                    box_label = internal_key
                 elif "right" in hid_str:
-                    internal_key = "Right_hand"
-                    box_label = "Right_hand"
+                    internal_key = self.actors_config[1]["id"] if len(self.actors_config) > 1 else self.actors_config[0]["id"]
+                    box_label = internal_key
 
                 if internal_key:
                     hoi_entry = h.get("hoi", {})
@@ -3053,10 +3093,14 @@ class HOIWindow(FrameControlMixin, QWidget):
         self._clear_relation_highlight()
         self.video_path = data.get("video_path", "") or self.video_path
 
-        # Restore Extra Label Config
+        # Restore Extra Configs
         if "extra_label_config" in data:
             self.extra_label_config = data["extra_label_config"]
             self._apply_extra_label_config()
+
+        if "actors_config" in data:
+            self.actors_config = data["actors_config"]
+            # Rebuild UI if needed? For now just keep it
         else:
             # Revert to default Hand Anomaly config if missing
             self.extra_label_config = {
@@ -3178,19 +3222,19 @@ class HOIWindow(FrameControlMixin, QWidget):
 
             tid_lower = str(track_id).lower()
             cat_lower = category.lower()
-            is_left = (cat_lower == "left_hand") or (
-                "left" in tid_lower and "hand" in tid_lower
-            )
-            is_right = (cat_lower == "right_hand") or (
-                "right" in tid_lower and "hand" in tid_lower
-            )
 
-            if is_left:
-                label = "Left_hand"
-            elif is_right:
-                label = "Right_hand"
-            else:
+            label = None
+            for actor in self.actors_config:
+                aid = actor["id"]
+                aid_lower = aid.lower()
+                if (cat_lower == aid_lower) or (aid_lower in tid_lower):
+                    label = aid
+                    break
+
+            if not label:
                 label = _label_for_id(obj_id) or category or f"obj_{obj_id}"
+
+            is_actor = any(actor["id"] == label for actor in self.actors_config)
 
             for entry in boxes:
                 frame = entry.get("frame", None)
@@ -3208,12 +3252,12 @@ class HOIWindow(FrameControlMixin, QWidget):
                         box_class_id = int(box_class_id)
                     except Exception:
                         pass
-                if is_left or is_right or obj_id is None:
+                if is_actor or obj_id is None:
                     bid = self.box_id_counter
                     self.box_id_counter += 1
                 else:
                     bid = obj_id
-                if not (is_left or is_right) and box_class_id is not None and label:
+                if not is_actor and box_class_id is not None and label:
                     if (
                         box_class_id not in self.class_map
                         and str(box_class_id) not in self.class_map
@@ -3228,7 +3272,7 @@ class HOIWindow(FrameControlMixin, QWidget):
                     "x2": x2,
                     "y2": y2,
                 }
-                if not (is_left or is_right) and box_class_id is not None:
+                if not is_actor and box_class_id is not None:
                     new_rb["class_id"] = box_class_id
                 self.raw_boxes.append(new_rb)
 
@@ -3270,24 +3314,32 @@ class HOIWindow(FrameControlMixin, QWidget):
                 "interaction_end": None,
                 "anomaly_label": self.extra_label_config.get("default_label", "Normal"),
             }
-            hoi_data = {"Left_hand": dict(empty), "Right_hand": dict(empty)}
-            hand_key = "Left_hand" if side_key == "left_hand" else "Right_hand"
-            hoi_data[hand_key] = {
-                "verb": verb,
-                "instrument_object_id": tool_id,
-                "target_object_id": target_id,
-                "interaction_start": s,
-                "functional_contact_onset": o,
-                "interaction_end": e,
-                "anomaly_label": anomaly,
-            }
+            hoi_data = {actor["id"]: dict(empty) for actor in self.actors_config}
+            # Correct matching
+            hand_key = None
+            for actor in self.actors_config:
+                if actor["id"].lower() == side_key:
+                    hand_key = actor["id"]
+                    break
+
+            if hand_key:
+                hoi_data[hand_key] = {
+                    "verb": verb,
+                    "instrument_object_id": tool_id,
+                    "target_object_id": target_id,
+                    "interaction_start": s,
+                    "functional_contact_onset": o,
+                    "interaction_end": e,
+                    "anomaly_label": anomaly,
+                }
             return {
                 "event_id": self.event_id_counter,
                 "frames": [start, end],
                 "hoi_data": hoi_data,
             }
 
-        for side_key in ["left_hand", "right_hand"]:
+        for actor in self.actors_config:
+            side_key = actor["id"].lower()
             for event in events.get(side_key, []) or []:
                 self.events.append(_event_to_entry(side_key, event))
                 self.event_id_counter += 1
@@ -3501,7 +3553,8 @@ class HOIWindow(FrameControlMixin, QWidget):
         """Update verb string in a hoi_data dict for both hands."""
         if not hoi_data or not old or old == new:
             return
-        for hand_key in ("Left_hand", "Right_hand"):
+        for actor in self.actors_config:
+            hand_key = actor["id"]
             h = hoi_data.get(hand_key, {})
             if h.get("verb") == old:
                 h["verb"] = new
@@ -3511,7 +3564,8 @@ class HOIWindow(FrameControlMixin, QWidget):
         seen = []
         for ev in self.events:
             hoi_data = ev.get("hoi_data", {}) or {}
-            for hand_key in ("Left_hand", "Right_hand"):
+            for actor in self.actors_config:
+                hand_key = actor["id"]
                 verb = (hoi_data.get(hand_key, {}) or {}).get("verb") or ""
                 if verb and verb not in seen:
                     seen.append(verb)
@@ -3571,7 +3625,7 @@ class HOIWindow(FrameControlMixin, QWidget):
         if not object_library:
             for rb in self.raw_boxes:
                 label = rb.get("label")
-                if label in ("Left_hand", "Right_hand"):
+                if self._is_hand_label(label):
                     continue
                 uid = rb.get("id")
                 if uid is None or str(uid) in object_library:
@@ -3590,17 +3644,16 @@ class HOIWindow(FrameControlMixin, QWidget):
 
         # --------------------------------------
 
-        # Build per-hand events
-        events = {"left_hand": [], "right_hand": []}
-        counts = {"Left_hand": 0, "Right_hand": 0}
+        # Build per-actor events
+        events = {actor["id"].lower(): [] for actor in self.actors_config}
+        counts = {actor["id"]: 0 for actor in self.actors_config}
 
         for i, event in enumerate(self.events):
             global_start, global_end = event.get("frames", [0, 0])
 
-            for hand_key, side_key in [
-                ("Left_hand", "left_hand"),
-                ("Right_hand", "right_hand"),
-            ]:
+            for actor in self.actors_config:
+                hand_key = actor["id"]
+                side_key = hand_key.lower()
                 h_data = event.get("hoi_data", {}).get(hand_key, {})
 
                 verb = h_data.get("verb", "")
@@ -3622,7 +3675,7 @@ class HOIWindow(FrameControlMixin, QWidget):
                     continue
 
                 counts[hand_key] += 1
-                prefix = "L" if hand_key == "Left_hand" else "R"
+                prefix = self._get_actor_short_label(hand_key)
                 event_id = f"{prefix}_{counts[hand_key]:03d}"
 
                 final_start = s if s is not None else global_start
@@ -3657,9 +3710,7 @@ class HOIWindow(FrameControlMixin, QWidget):
                 event_entry["interaction"] = interaction
 
                 links = {
-                    "subject_track_id": (
-                        "T_LHAND" if hand_key == "Left_hand" else "T_RHAND"
-                    ),
+                    "subject_track_id": f"T_{hand_key.upper()}",
                     "tool_track_id": f"T_OBJ_{instr}" if instr is not None else None,
                     "target_track_id": (
                         f"T_OBJ_{target}" if target is not None else None
@@ -3684,16 +3735,15 @@ class HOIWindow(FrameControlMixin, QWidget):
             out.sort(key=lambda x: x["frame"])
             return out
 
-        tracks["T_LHAND"] = {
-            "category": "left_hand",
-            "object_id": None,
-            "boxes": collect_hand_boxes("Left_hand"),
-        }
-        tracks["T_RHAND"] = {
-            "category": "right_hand",
-            "object_id": None,
-            "boxes": collect_hand_boxes("Right_hand"),
-        }
+        for actor in self.actors_config:
+            hand_key = actor["id"]
+            side_key = hand_key.lower()
+            track_id = f"T_{hand_key.upper()}"
+            tracks[track_id] = {
+                "category": side_key,
+                "object_id": None,
+                "boxes": collect_hand_boxes(hand_key),
+            }
 
         for uid_str, info in object_library.items():
             uid = int(uid_str)
@@ -3731,6 +3781,7 @@ class HOIWindow(FrameControlMixin, QWidget):
             "object_library": object_library,
             "verb_library": verb_library,
             "extra_label_config": self.extra_label_config,
+            "actors_config": self.actors_config,
             "tracks": tracks,
             "hoi_events": events,
         }
@@ -3770,7 +3821,7 @@ class HOIWindow(FrameControlMixin, QWidget):
         highlight_ids = highlights.get("by_id", {})
         highlight_labels = highlights.get("by_label", {})
         boxes = self.bboxes.get(frame, [])
-        self.current_hands = {"Left_hand": None, "Right_hand": None}
+        self.current_hands = {actor["id"]: None for actor in self.actors_config}
 
         self.list_objects.blockSignals(True)
         self.list_objects.clear()
@@ -3782,7 +3833,7 @@ class HOIWindow(FrameControlMixin, QWidget):
             norm_hand = self._normalize_hand_label(lbl)
             if norm_hand:
                 self.current_hands[norm_hand] = b
-                hand_short = "L" if norm_hand == "Left_hand" else "R"
+                hand_short = self._get_actor_short_label(norm_hand)
                 item_txt = f"[Hand] {hand_short}"
                 draw_label = hand_short
                 color = "#ff00ff"
@@ -3907,7 +3958,8 @@ class HOIWindow(FrameControlMixin, QWidget):
 
         # 1. Valid HOIs from committed events
         for ev in self.events:
-            for hand_key in ["Left_hand", "Right_hand"]:
+            for actor in self.actors_config:
+                hand_key = actor["id"]
                 h_data = ev["hoi_data"][hand_key]
                 s = h_data.get("interaction_start")
                 e = h_data.get("interaction_end")
@@ -3919,7 +3971,8 @@ class HOIWindow(FrameControlMixin, QWidget):
 
         # 2. Preview from current Draft
         if hasattr(self, "event_draft"):
-            for hand_key in ["Left_hand", "Right_hand"]:
+            for actor in self.actors_config:
+                hand_key = actor["id"]
                 h_data = self.event_draft[hand_key]
                 if h_data.get("target_object_id"):
                     draw_item = dict(h_data)
@@ -4218,7 +4271,7 @@ class HOIWindow(FrameControlMixin, QWidget):
         obj_box = items[0].data(Qt.UserRole)
         if not obj_box:
             return
-        if str(obj_box.get("label")) in ("Left_hand", "Right_hand"):
+        if self._is_hand_label(obj_box.get("label")):
             return
         obj_id = obj_box["id"]
 
@@ -4267,15 +4320,12 @@ class HOIWindow(FrameControlMixin, QWidget):
             # Set new state
             self.selected_hand_label = hand_label
 
-            # Enforce Mutex UI
-            if hand_label == "Left_hand":
-                self.chk_right.blockSignals(True)
-                self.chk_right.setChecked(False)
-                self.chk_right.blockSignals(False)
-            else:
-                self.chk_left.blockSignals(True)
-                self.chk_left.setChecked(False)
-                self.chk_left.blockSignals(False)
+            # Enforce Mutex UI: uncheck other actors
+            for aid, chk in self.actor_controls.items():
+                if aid != hand_label:
+                    chk.blockSignals(True)
+                    chk.setChecked(False)
+                    chk.blockSignals(False)
 
             # Load new hand data to UI
             self._load_hand_draft_to_ui(hand_label)
@@ -4487,8 +4537,8 @@ class HOIWindow(FrameControlMixin, QWidget):
     def _class_id_for_object(self, uid, label=None):
         for rb in self.raw_boxes:
             if rb.get("id") == uid and rb.get("label") not in (
-                "Left_hand",
-                "Right_hand",
+                self.actors_config[0]["id"],
+                self.actors_config[1]["id"] if len(self.actors_config) > 1 else self.actors_config[0]["id"],
             ):
                 cid = rb.get("class_id")
                 if cid is not None:
@@ -4718,9 +4768,9 @@ class HOIWindow(FrameControlMixin, QWidget):
                 return None
             l_lower = str(l_str).lower().strip()
             if l_lower in ["left", "left_hand", "l_hand", "left hand"]:
-                return "Left_hand"
+                return self.actors_config[0]["id"]
             if l_lower in ["right", "right_hand", "r_hand", "right hand"]:
-                return "Right_hand"
+                return self.actors_config[1]["id"] if len(self.actors_config) > 1 else self.actors_config[0]["id"]
             return None
 
         def extract_frame_from_name(name_str):
@@ -5006,7 +5056,8 @@ class HOIWindow(FrameControlMixin, QWidget):
                     break
                     
         # Update event drafts (including the current draft)
-        for hand_label in ["Left_hand", "Right_hand"]:
+        for actor in self.actors_config:
+            hand_label = actor["id"]
             if hand_label in self.event_draft:
                 cur = self.event_draft[hand_label].get("anomaly_label", "")
                 if cur:
@@ -5022,7 +5073,8 @@ class HOIWindow(FrameControlMixin, QWidget):
         # Update all events
         for ev in self.events:
             if "hoi_data" in ev:
-                for hand_key in ["Left_hand", "Right_hand"]:
+                for actor in self.actors_config:
+                    hand_key = actor["id"]
                     cur = ev["hoi_data"].get(hand_key, {}).get("anomaly_label", "")
                     if cur:
                         parts = [p.strip() for p in cur.split(",")]
@@ -5192,7 +5244,7 @@ class HOIWindow(FrameControlMixin, QWidget):
         if not box_data:
             return
 
-        if str(box_data.get("label")) in ("Left_hand", "Right_hand"):
+        if self._is_hand_label(box_data.get("label")):
             return
 
         menu = QMenu(self)
@@ -5327,7 +5379,7 @@ class HOIWindow(FrameControlMixin, QWidget):
             max_iou = 0.0
 
             for nb in next_boxes:
-                if str(nb.get("label")) in ("Left_hand", "Right_hand"):
+                if self._is_hand_label(nb.get("label")):
                     continue
 
                 def get_iou(boxA, boxB):
@@ -5438,7 +5490,7 @@ class HOIWindow(FrameControlMixin, QWidget):
             root = ET.Element("annotations")
             ET.SubElement(root, "meta")
 
-            tracks = {"Left_hand": [], "Right_hand": []}
+            tracks = {actor["id"]: [] for actor in self.actors_config}
 
             for b in self.raw_boxes:
                 lbl = b.get("label")
@@ -5482,25 +5534,12 @@ class HOIWindow(FrameControlMixin, QWidget):
     def _reset_event_draft(self):
         """[Step 1] Initialize/reset event draft structure."""
         self.event_draft = {
-            "Left_hand": {
-                "verb": "",
-                "instrument_object_id": None,
-                "target_object_id": None,
-                "interaction_start": None,
-                "functional_contact_onset": None,
-                "interaction_end": None,
-                "anomaly_label": self.extra_label_config.get("default_label", "Normal"),
-            },
-            "Right_hand": {
-                "verb": "",
-                "instrument_object_id": None,
-                "target_object_id": None,
-                "interaction_start": None,
-                "functional_contact_onset": None,
-                "interaction_end": None,
-                "anomaly_label": self.extra_label_config.get("default_label", "Normal"),
-            },
+            "verb": None,
+            "instrument_object_id": None,
+            "target_object_id": None,
         }
+        for actor in self.actors_config:
+            self.event_draft[actor["id"]] = self._blank_hand_data()
         if hasattr(self, "lbl_event_status"):
             self.lbl_event_status.setText("No event selected.")
         if hasattr(self, "anomaly_list"):
@@ -5523,8 +5562,88 @@ class HOIWindow(FrameControlMixin, QWidget):
         hand_data["target_object_id"] = target_id
         hand_data["anomaly_label"] = anomaly
 
+    def _rebuild_actor_checkboxes(self):
+        # Clear old
+        while self.actor_layout.count():
+            item = self.actor_layout.takeAt(0)
+            if item.widget():
+                item.widget().setParent(None)
+                item.widget().deleteLater()
+        self.actor_controls.clear()
+
+        # Re-add
+        for actor in self.actors_config:
+            aid = actor["id"]
+            short = actor.get("short", aid[:1])
+            chk = QCheckBox(short)
+            chk.setToolTip(actor.get("label", aid))
+            chk.toggled.connect(lambda on, a=aid: self._select_hand(a, on))
+            self.actor_layout.addWidget(chk)
+            self.actor_controls[aid] = chk
+
+    def _on_configure_actors(self):
+        """Show dialog to manage actors."""
+        actions = ["Add Actor", "Remove Actor", "Rename Actor"]
+        action, ok = QInputDialog.getItem(
+            self, "Configure Actors", "Select action:", actions, 0, False
+        )
+        if not ok:
+            return
+
+        if action == "Add Actor":
+            name, ok = QInputDialog.getText(self, "Add Actor", "Actor ID (e.g. hand_3):")
+            if ok and name:
+                self.actors_config.append(
+                    {
+                        "id": name,
+                        "label": name.replace("_", " ").title(),
+                        "short": name[:1].upper(),
+                    }
+                )
+                self._reinit_actor_system()
+        elif action == "Remove Actor":
+            ids = [a["id"] for a in self.actors_config]
+            name, ok = QInputDialog.getItem(
+                self, "Remove Actor", "Select actor to remove:", ids, 0, False
+            )
+            if ok and len(self.actors_config) > 1:
+                self.actors_config = [a for a in self.actors_config if a["id"] != name]
+                self._reinit_actor_system()
+        elif action == "Rename Actor":
+            ids = [a["id"] for a in self.actors_config]
+            old_name, ok = QInputDialog.getItem(
+                self, "Rename Actor", "Select actor to rename:", ids, 0, False
+            )
+            if ok:
+                new_name, ok = QInputDialog.getText(
+                    self, "Rename Actor", f"New ID for {old_name}:", QLineEdit.Normal, old_name
+                )
+                if ok and new_name and new_name != old_name:
+                    for a in self.actors_config:
+                        if a["id"] == old_name:
+                            a["id"] = new_name
+                            a["label"] = new_name.replace("_", " ").title()
+                            a["short"] = new_name[:1].upper()
+                    self._reinit_actor_system()
+
+    def _reinit_actor_system(self):
+        """Update UI and Timeline after actor config change."""
+        self._rebuild_actor_checkboxes()
+        self._reset_event_draft()
+        if hasattr(self, "hoi_timeline"):
+            self.hoi_timeline.actors_config = self.actors_config
+            self.hoi_timeline._reinit_rows()
+            self.hoi_timeline.refresh()
+        self._update_status_label()
+
     def _swap_frame_hands(self):
-        """Swap Left/Right hand boxes on the current frame and persist the labels."""
+        """Swap boxes for the first two actors on current frame."""
+        if len(self.actors_config) < 2:
+            return
+
+        a1 = self.actors_config[0]["id"]
+        a2 = self.actors_config[1]["id"]
+
         if not self.player.cap:
             QMessageBox.information(
                 self, "Info", "Load a video before swapping frame hands."
@@ -5532,15 +5651,17 @@ class HOIWindow(FrameControlMixin, QWidget):
             return
         frame_idx = int(self.player.current_frame)
         target_orig = frame_idx - int(self.start_offset)
+
+        actor_ids = [a1, a2]
         hand_boxes = [
             rb
             for rb in self.raw_boxes
             if rb.get("orig_frame") == target_orig
-            and rb.get("label") in ("Left_hand", "Right_hand")
+            and rb.get("label") in actor_ids
         ]
         if not hand_boxes:
             QMessageBox.information(
-                self, "Info", "No hand boxes found on the current frame."
+                self, "Info", f"No boxes for {a1}/{a2} found on the current frame."
             )
             return
 
@@ -5549,16 +5670,16 @@ class HOIWindow(FrameControlMixin, QWidget):
             if rb.get("orig_frame") != target_orig:
                 continue
             lbl = rb.get("label")
-            if lbl == "Left_hand":
-                rb["label"] = "Right_hand"
-            elif lbl == "Right_hand":
-                rb["label"] = "Left_hand"
+            if lbl == a1:
+                rb["label"] = a2
+            elif lbl == a2:
+                rb["label"] = a1
 
         self._rebuild_bboxes_from_raw()
         self._refresh_boxes_for_frame(frame_idx)
         self._log("hoi_frame_swap_hands", frame=frame_idx)
         QMessageBox.information(
-            self, "Swapped", "Swapped Left/Right hand boxes on this frame."
+            self, "Swapped", f"Swapped {a1}/{a2} boxes on this frame."
         )
 
     def _load_hand_draft_to_ui(self, hand_label: str):
@@ -5633,9 +5754,11 @@ class HOIWindow(FrameControlMixin, QWidget):
                     inst_name = name
                 if target_id is not None and id_val == target_id:
                     target_name = name
-            hand_short = "L" if hand == "Left_hand" else "R"
-            hand_info = f"{hand_short}: [{s_txt}-{o_txt}-{e_txt}] | Anom: {anom} | Verb: {verb} | Tool: {inst_name} | Target: {target_name}"
+            
+            actor_label = self._get_actor_full_label(hand)
+            self.lbl_event_status.setText(
+                f"Event {self.selected_event_id} | {actor_label} | "
+                f"S:{s_txt} O:{o_txt} E:{e_txt} | V:{verb} | I:{inst_name} T:{target_name} | A:{anom}"
+            )
         else:
-            hand_info = "Select L/R to edit this HandOI segment"
-
-        self.lbl_event_status.setText(hand_info)
+            self.lbl_event_status.setText(f"Event {self.selected_event_id} selected.")

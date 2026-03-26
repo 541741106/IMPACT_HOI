@@ -363,7 +363,7 @@ class HOITimelineRow(BaseTimelineRow):
 
 
 class HOITimeline(QWidget):
-    """Two-row HOI timeline (Left/Right hand) with onset markers."""
+    """Multi-actor HOI timeline with dynamic row generation."""
 
     def __init__(
         self,
@@ -377,6 +377,7 @@ class HOITimeline(QWidget):
         get_frame_count: Callable[[], int],
         get_fps: Callable[[], int],
         get_title_for_hand: Optional[Callable[[str], str]] = None,
+        actors_config: List[Dict] = None,
         parent=None,
     ):
         super().__init__(parent)
@@ -397,53 +398,26 @@ class HOITimeline(QWidget):
         self._user_span_override = False
         self._selected_event_id: Optional[int] = None
         self._selected_hand: Optional[str] = None
+        
+        self.actors_config = actors_config or [
+            {"id": "Left_hand", "short": "L"},
+            {"id": "Right_hand", "short": "R"},
+        ]
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(4)
 
-        self.row_left = HOITimelineRow(
-            "Left_hand",
-            "L",
-            lambda: self._get_segments("Left_hand"),
-            self._get_color,
-            self._on_select,
-            self._on_update,
-            self._on_create,
-            self._on_delete,
-            self._on_hover,
-            self._get_fc,
-            self.get_view_start,
-            self.get_view_span,
-            self._get_fps,
-            self.get_gutter,
-            self,
-        )
-        self.row_right = HOITimelineRow(
-            "Right_hand",
-            "R",
-            lambda: self._get_segments("Right_hand"),
-            self._get_color,
-            self._on_select,
-            self._on_update,
-            self._on_create,
-            self._on_delete,
-            self._on_hover,
-            self._get_fc,
-            self.get_view_start,
-            self.get_view_span,
-            self._get_fps,
-            self.get_gutter,
-            self,
-        )
         self.rows_frame = QFrame(self)
         self.rows_frame.setFrameShape(QFrame.Box)
         self.rows_frame.setFrameShadow(QFrame.Plain)
-        rows_layout = QVBoxLayout(self.rows_frame)
-        rows_layout.setContentsMargins(6, 6, 6, 6)
-        rows_layout.setSpacing(4)
-        rows_layout.addWidget(self.row_left)
-        rows_layout.addWidget(self.row_right)
+        self.rows_layout = QVBoxLayout(self.rows_frame)
+        self.rows_layout.setContentsMargins(6, 6, 6, 6)
+        self.rows_layout.setSpacing(4)
+        
+        self.actor_rows: Dict[str, HOITimelineRow] = {}
+        self._build_rows()
+        
         layout.addWidget(self.rows_frame)
 
         controls = QHBoxLayout()
@@ -462,8 +436,45 @@ class HOITimeline(QWidget):
         self._init_sliders()
         self.update_titles()
 
+    def _reinit_rows(self):
+        """Rebuild rows based on updated actors_config."""
+        self._build_rows()
+        self.update_titles()
+        self.update()
+
+    def _build_rows(self):
+        # Clear existing rows if any
+        for row in self.actor_rows.values():
+            self.rows_layout.removeWidget(row)
+            row.deleteLater()
+        self.actor_rows.clear()
+
+        for actor in self.actors_config:
+            aid = actor["id"]
+            short = actor.get("short", aid[:1])
+            row = HOITimelineRow(
+                aid,
+                short,
+                lambda a=aid: self._get_segments(a),
+                self._get_color,
+                self._on_select,
+                self._on_update,
+                self._on_create,
+                self._on_delete,
+                self._on_hover,
+                self._get_fc,
+                self.get_view_start,
+                self.get_view_span,
+                self._get_fps,
+                self.get_gutter,
+                self,
+            )
+            self.actor_rows[aid] = row
+            self.rows_layout.addWidget(row)
+
     def sizeHint(self) -> QSize:
-        return QSize(900, 110)
+        row_count = len(self.actor_rows)
+        return QSize(900, 30 + row_count * 40)
 
     def get_view_start(self) -> int:
         return self._view_start
@@ -490,15 +501,17 @@ class HOITimeline(QWidget):
         self._gutter_px = max(90, max_w + 16)
 
     def update_titles(self):
-        if not self._get_title:
-            return
-        left_title = self._get_title("Left_hand") or "Left hand"
-        right_title = self._get_title("Right_hand") or "Right hand"
-        self.row_left.set_title(left_title)
-        self.row_right.set_title(right_title)
-        self._compute_gutter_px([left_title, right_title])
-        self.row_left.update()
-        self.row_right.update()
+        titles = []
+        for aid, row in self.actor_rows.items():
+            title = aid
+            if self._get_title:
+                title = self._get_title(aid) or aid
+            row.set_title(title)
+            titles.append(title)
+        
+        self._compute_gutter_px(titles)
+        for row in self.actor_rows.values():
+            row.update()
 
     def set_frame_count(self, fc: int):
         fc = max(1, int(fc))
@@ -546,13 +559,13 @@ class HOITimeline(QWidget):
         self._view_start = min(self._view_start, max_start)
         self.slider_view.setValue(self._view_start)
         self.slider_view.blockSignals(False)
-        self.row_left.update()
-        self.row_right.update()
+        for row in self.actor_rows.values():
+            row.update()
 
     def _on_view_start_changed(self, v: int):
         self._view_start = int(v)
-        self.row_left.update()
-        self.row_right.update()
+        for row in self.actor_rows.values():
+            row.update()
 
     def _on_view_span_changed(self, val: int):
         fc = max(1, int(self._get_fc()))
@@ -581,15 +594,15 @@ class HOITimeline(QWidget):
     def set_selected(self, event_id: Optional[int], hand_key: Optional[str]):
         self._selected_event_id = event_id
         self._selected_hand = hand_key
-        self.row_left.set_selected(event_id if hand_key == "Left_hand" else None)
-        self.row_right.set_selected(event_id if hand_key == "Right_hand" else None)
+        for aid, row in self.actor_rows.items():
+            row.set_selected(event_id if hand_key == aid else None)
 
     def set_current_frame(self, frame: int, follow: bool = True):
         if follow:
             self._ensure_visible(frame)
-        self.row_left.set_current_frame(frame)
-        self.row_right.set_current_frame(frame)
+        for row in self.actor_rows.values():
+            row.set_current_frame(frame)
 
     def refresh(self):
-        self.row_left.update()
-        self.row_right.update()
+        for row in self.actor_rows.values():
+            row.update()
