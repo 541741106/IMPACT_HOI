@@ -1,0 +1,131 @@
+from PyQt5.QtCore import Qt
+from PyQt5.QtWidgets import QApplication, QSizePolicy, QVBoxLayout, QWidget
+
+from ui.placeholder import PlaceholderPane
+from utils.op_logger import OperationLogger
+from utils.optional_deps import (
+    MissingOptionalDependency,
+    format_missing_dependency_message,
+    import_optional_module,
+)
+from utils.shortcut_settings import load_logging_policy, save_logging_policy
+
+
+class MainWindow(QWidget):
+    """Standalone host for HandOI / HOI Detection."""
+
+    def __init__(self, logger: OperationLogger = None):
+        super().__init__()
+        self._app_title = "IMPACT HOI"
+        self.setWindowTitle(self._app_title)
+        self.setGeometry(100, 80, 1200, 780)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        try:
+            screen = QApplication.primaryScreen()
+            geom = screen.availableGeometry() if screen else None
+            if geom:
+                min_w = min(800, max(640, geom.width() - 80))
+                min_h = min(600, max(480, geom.height() - 80))
+                self.setMinimumSize(min_w, min_h)
+                target_w = min(1200, geom.width() - 60)
+                target_h = min(780, geom.height() - 60)
+                self.resize(max(min_w, target_w), max(min_h, target_h))
+            else:
+                self.setMinimumSize(800, 600)
+        except Exception:
+            self.setMinimumSize(800, 600)
+        try:
+            self.setWindowFlag(Qt.MSWindowsFixedSizeDialogHint, False)
+        except Exception:
+            pass
+
+        self.op_logger = logger or OperationLogger(False)
+        initial_logging = load_logging_policy(
+            default_ops_enabled=bool(getattr(self.op_logger, "enabled", False)),
+            default_validation_summary_enabled=True,
+        )
+        self._validation_summary_enabled = bool(
+            initial_logging.get("validation_summary_enabled", True)
+        )
+        self.op_logger.enabled = bool(initial_logging.get("ops_csv_enabled", False))
+        self.task_items = ["HandOI / HOI Detection"]
+        self.hoi_window = None
+        self.placeholder = None
+
+        root = QVBoxLayout(self)
+
+        try:
+            module = import_optional_module(
+                "ui.hoi_window",
+                feature_name="HandOI / HOI Detection",
+                install_hint=(
+                    "Install the optional HOI dependencies only if you need this task, "
+                    "for example: pip install opencv-python ultralytics mediapipe torch torchvision torchaudio"
+                ),
+            )
+            HOIWindow = getattr(module, "HOIWindow")
+            self.hoi_window = HOIWindow(
+                self,
+                on_close=None,
+                on_switch_task=self._on_task_changed,
+                tasks=self.task_items,
+                logger=self.op_logger,
+            )
+            root.addWidget(self.hoi_window)
+            self._apply_shortcuts()
+            self._set_logging_policy(
+                bool(getattr(self.op_logger, "enabled", False)),
+                bool(self._validation_summary_enabled),
+            )
+        except MissingOptionalDependency as ex:
+            self.placeholder = PlaceholderPane(
+                "HandOI / HOI Detection",
+                format_missing_dependency_message(ex),
+                tasks=self.task_items,
+                on_switch_task=self._on_task_changed,
+            )
+            root.addWidget(self.placeholder)
+        except Exception as ex:
+            self.placeholder = PlaceholderPane(
+                "HandOI / HOI Detection",
+                f"Failed to load the task window:\n{ex}",
+                tasks=self.task_items,
+                on_switch_task=self._on_task_changed,
+            )
+            root.addWidget(self.placeholder)
+
+    def _apply_shortcuts(self, bindings=None) -> None:
+        try:
+            if self.hoi_window is not None:
+                self.hoi_window.apply_shortcut_settings(bindings)
+        except Exception:
+            pass
+
+    def _set_logging_policy(
+        self, oplog_enabled: bool, validation_summary_enabled: bool
+    ) -> None:
+        self.op_logger.enabled = bool(oplog_enabled)
+        self._validation_summary_enabled = bool(validation_summary_enabled)
+        try:
+            ok_save, path_or_err = save_logging_policy(
+                {
+                    "ops_csv_enabled": bool(oplog_enabled),
+                    "validation_summary_enabled": bool(validation_summary_enabled),
+                }
+            )
+            if not ok_save:
+                print(f"[LOG][ERROR] Failed to save logging policy: {path_or_err}")
+        except Exception:
+            pass
+        try:
+            if self.hoi_window is not None:
+                self.hoi_window.set_logging_policy(
+                    bool(oplog_enabled), bool(validation_summary_enabled)
+                )
+        except Exception:
+            pass
+
+    def _on_task_changed(self, text: str) -> None:
+        lower = (text or "").lower()
+        if ("handoi" in lower) or ("hoi" in lower):
+            return
