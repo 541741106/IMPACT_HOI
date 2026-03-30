@@ -31,6 +31,9 @@ from PyQt5.QtWidgets import (
     QHeaderView,
     QDialogButtonBox,
     QRadioButton,
+    QButtonGroup,
+    QProgressDialog,
+    QApplication,
 )
 from ui.mixins import FrameControlMixin
 from PyQt5.QtCore import Qt, QSize, QThread, pyqtSignal
@@ -57,7 +60,38 @@ import cv2
 import re
 import yaml
 from datetime import datetime
+from core.videomae_v2_logic import VideoMAEHandler
 
+
+class ActionLabelSelector(QDialog):
+    def __init__(self, candidates, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Select Action Label")
+        self.layout = QVBoxLayout(self)
+        self.selected_label = None
+        
+        self.layout.addWidget(QLabel("Multiple high-confidence actions detected. Please select one:"))
+        
+        self.group = QButtonGroup(self)
+        for i, cand in enumerate(candidates):
+            rb = QRadioButton(f"{cand['label']} ({cand['score']:.2%})")
+            if i == 0:
+                rb.setChecked(True)
+            self.group.addButton(rb, i)
+            self.layout.addWidget(rb)
+        
+        self.btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        self.btns.accepted.connect(self.accept)
+        self.btns.rejected.connect(self.reject)
+        self.layout.addWidget(self.btns)
+        
+        self.candidates = candidates
+
+    def get_selected_label(self):
+        idx = self.group.checkedId()
+        if idx >= 0:
+            return self.candidates[idx]['label']
+        return self.candidates[0]['label']
 
 class YoloTrainDialog(QDialog):
     def __init__(self, parent=None, default_epochs=10):
@@ -258,6 +292,11 @@ class HOIWindow(FrameControlMixin, QWidget):
         self.mp_hands_conf = 0.5
         self.mp_hands_track_conf = 0.5
         self.mp_hands_swap = False
+
+        # VideoMAE V2 action detection
+        self.videomae_handler = VideoMAEHandler()
+        self.videomae_weights_path = ""
+        self.videomae_verb_list_path = ""
         self._hoi_undo_stack = []
         self._hoi_redo_stack = []
         self._undo_block = False
@@ -317,6 +356,11 @@ class HOIWindow(FrameControlMixin, QWidget):
         self.file_menu.addAction("Export Hands XML...", self._save_hands_xml)
         self.file_menu.addSeparator()
         self.file_menu.addAction("YOLO Incremental Training...", self._incremental_train_yolo)
+        self.file_menu.addSeparator()
+        self.file_menu.addAction("Load VideoMAE Model...", self._load_videomae_model)
+        self.file_menu.addAction("Load VideoMAE Verb List...", self._load_videomae_verb_list)
+        self.file_menu.addAction("Detect Selected Action Label", self._detect_selected_action_label)
+        self.file_menu.addAction("Detect All Action Labels", self._detect_all_action_labels)
         self.btn_file_menu = QToolButton()
         self.btn_file_menu.setText("Files")
         self.btn_file_menu.setPopupMode(QToolButton.InstantPopup)
@@ -2011,6 +2055,112 @@ class HOIWindow(FrameControlMixin, QWidget):
             self._log("hoi_load_yolo_model", path=fp)
         except Exception as ex:
             QMessageBox.warning(self, "Error", f"Failed to load model:\n{ex}")
+
+    def _load_videomae_model(self):
+        fp, _ = QFileDialog.getOpenFileName(
+            self, "Load VideoMAE Model", "", "Weight Files (*.pt *.bin *.safetensors);;All Files (*)"
+        )
+        if not fp:
+            return
+        self.videomae_weights_path = fp
+        if self.videomae_verb_list_path:
+            self._init_videomae()
+        else:
+            QMessageBox.information(self, "Info", "Model path stored. Please load a verb list to initialize.")
+
+    def _load_videomae_verb_list(self):
+        fp, _ = QFileDialog.getOpenFileName(
+            self, "Load VideoMAE Verb List", "", "YAML/JSON Files (*.yaml *.json);;Text Files (*.txt);;All Files (*)"
+        )
+        if not fp:
+            return
+        self.videomae_verb_list_path = fp
+        if self.videomae_weights_path:
+            self._init_videomae()
+        else:
+            QMessageBox.information(self, "Info", "Verb list stored. Please load model weights to initialize.")
+
+    def _init_videomae(self):
+        success, msg = self.videomae_handler.load_model(self.videomae_weights_path, self.videomae_verb_list_path)
+        if success:
+            QMessageBox.information(self, "Success", f"VideoMAE V2 initialized:\n{msg}")
+            self._log("hoi_load_videomae", weights=self.videomae_weights_path, verbs=self.videomae_verb_list_path)
+        else:
+            QMessageBox.warning(self, "Error", f"Failed to load VideoMAE V2:\n{msg}")
+
+    def _detect_selected_action_label(self):
+        if not self.selected_event_id:
+            QMessageBox.warning(self, "Warning", "Please select an action segment first.")
+            return
+        self._detect_action_label(self.selected_event_id, interactive=True)
+
+    def _detect_action_label(self, event_id, interactive=True):
+        event = self._find_event_by_id(event_id)
+        if not event: return
+        
+        start = event.get("interaction_start")
+        end = event.get("interaction_end")
+        if start is None or end is None:
+            if interactive:
+                QMessageBox.warning(self, "Warning", "Action segment must have start and end frames.")
+            return
+
+        candidates, err = self.videomae_handler.predict(self.video_path, start, end)
+        if err:
+            if interactive:
+                QMessageBox.warning(self, "Detection Error", err)
+            return
+
+        if not candidates:
+            if interactive:
+                QMessageBox.information(self, "Info", "No labels predicted.")
+            return
+
+        selected = None
+        if interactive:
+            dlg = ActionLabelSelector(candidates, self)
+            if dlg.exec_() == QDialog.Accepted:
+                selected = dlg.get_selected_label()
+            else:
+                # Default to top rank if canceled as per user request
+                selected = candidates[0]['label']
+        else:
+            selected = candidates[0]['label']
+            
+        if selected:
+            # Find the verb id in self.verbs
+            verb_id = -1
+            for v in self.verbs:
+                if v.name.lower() == selected.lower():
+                    verb_id = v.id
+                    break
+            
+            if verb_id != -1:
+                event["verb_id"] = verb_id
+                self._refresh_events()
+                if hasattr(self, "hoi_timeline") and self.hoi_timeline:
+                    self.hoi_timeline.refresh()
+            elif interactive:
+                 QMessageBox.warning(self, "Error", f"Verb '{selected}' not found in the current project verb list.")
+
+    def _detect_all_action_labels(self):
+        if not self.events:
+            QMessageBox.information(self, "Info", "No actions to detect.")
+            return
+            
+        progress = QProgressDialog("Detecting all action labels...", "Cancel", 0, len(self.events), self)
+        progress.setWindowModality(Qt.WindowModal)
+        progress.show()
+        
+        for i, event in enumerate(self.events):
+            if progress.wasCanceled():
+                break
+            progress.setValue(i)
+            QApplication.processEvents()
+            self._detect_action_label(event["event_id"], interactive=False)
+        
+        progress.setValue(len(self.events))
+        QMessageBox.information(self, "Finished", "Batch action detection complete.")
 
     def _ask_existing_policy(self):
         """Ask how to handle existing boxes on the current frame."""
