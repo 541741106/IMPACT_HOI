@@ -36,7 +36,7 @@ from PyQt5.QtWidgets import (
     QApplication,
 )
 from ui.mixins import FrameControlMixin
-from PyQt5.QtCore import Qt, QSize, QThread, pyqtSignal
+from PyQt5.QtCore import Qt, QSize, QThread, pyqtSignal, QTimer
 from PyQt5.QtWidgets import QStyle
 from PyQt5.QtGui import QKeySequence, QColor
 import copy
@@ -187,7 +187,9 @@ class YoloTrainWorker(QThread):
                 lr0=self.config['lr0'],
                 device='cuda' if torch.cuda.is_available() else 'cpu',
                 project=self.config['output_dir'],
-                name='train_run'
+                name='train_run',
+                workers=0, # Avoid multiprocessing issues on Windows
+                exist_ok=True
             )
             self.finished.emit(True, f"Training complete. Results saved to {results.save_dir}")
         except Exception as e:
@@ -513,8 +515,16 @@ class HOIWindow(FrameControlMixin, QWidget):
         self.list_objects.show()
         self.list_objects.itemSelectionChanged.connect(self._on_object_selection)
         self.list_objects.setEnabled(False)
+        
+        self.list_top5 = QListWidget()
+        self.list_top5.setSelectionMode(QAbstractItemView.NoSelection)
+        self.list_top5.show()
+        self.list_top5.setEnabled(False)
+        
         right_col.addWidget(QLabel("Objects (current frame):"))
-        right_col.addWidget(self.list_objects, 2)
+        right_col.addWidget(self.list_objects, 1)
+        right_col.addWidget(QLabel("Action Top 5 (VideoMAE):"))
+        right_col.addWidget(self.list_top5, 1)
 
         # --- Customizable Extra Label Module UI setup moved to top of __init__ ---
         self.group_anomaly = QGroupBox(self.extra_label_config.get("title", "Hand Anomaly Label"))
@@ -1027,8 +1037,13 @@ class HOIWindow(FrameControlMixin, QWidget):
         self._load_hand_draft_to_ui(hand_key)
         self._update_status_label()
         self.list_objects.setEnabled(True)
+        self.selected_event_id = event_id
 
-        self.hoi_timeline.set_selected(event_id, hand_key)
+        if hasattr(self, "hoi_timeline") and self.hoi_timeline:
+            self.hoi_timeline.set_selected(event_id, hand_key)
+            self.hoi_timeline.refresh()
+            
+        self._update_action_top5_display(event_id)
         self._update_overlay(self.player.current_frame)
         self._update_hoi_titles()
 
@@ -1547,6 +1562,8 @@ class HOIWindow(FrameControlMixin, QWidget):
             )
             self.hoi_timeline.set_current_frame(frame)
             self.hoi_timeline.refresh()
+        
+        self._update_action_top5_display(self.selected_event_id)
 
     def _push_undo(self):
         if self._undo_block:
@@ -2098,8 +2115,7 @@ class HOIWindow(FrameControlMixin, QWidget):
         event = self._find_event_by_id(event_id)
         if not event: return
         
-        start = event.get("interaction_start")
-        end = event.get("interaction_end")
+        start, end = self._compute_event_frames(event)
         if start is None or end is None:
             if interactive:
                 QMessageBox.warning(self, "Warning", "Action segment must have start and end frames.")
@@ -2116,6 +2132,9 @@ class HOIWindow(FrameControlMixin, QWidget):
                 QMessageBox.information(self, "Info", "No labels predicted.")
             return
 
+        # NEW: Store top5 results in event
+        event["videomae_top5"] = candidates
+
         selected = None
         if interactive:
             dlg = ActionLabelSelector(candidates, self)
@@ -2124,6 +2143,8 @@ class HOIWindow(FrameControlMixin, QWidget):
             else:
                 # Default to top rank if canceled as per user request
                 selected = candidates[0]['label']
+            # Update display immediately if interactive
+            self._update_action_top5_display(event_id)
         else:
             selected = candidates[0]['label']
             
@@ -2137,11 +2158,37 @@ class HOIWindow(FrameControlMixin, QWidget):
             
             if verb_id != -1:
                 event["verb_id"] = verb_id
+                # Update hoi_data verb for consistency if needed (optional but good)
+                for hand in self.actors_config:
+                    hid = hand["id"]
+                    if hid in event.get("hoi_data", {}):
+                        event["hoi_data"][hid]["verb"] = selected
+                
                 self._refresh_events()
                 if hasattr(self, "hoi_timeline") and self.hoi_timeline:
                     self.hoi_timeline.refresh()
             elif interactive:
                  QMessageBox.warning(self, "Error", f"Verb '{selected}' not found in the current project verb list.")
+
+    def _update_action_top5_display(self, event_id):
+        if not hasattr(self, "list_top5") or not self.list_top5:
+            return
+        
+        self.list_top5.clear()
+        if event_id is None:
+            self.list_top5.setEnabled(False)
+            return
+            
+        event = self._find_event_by_id(event_id)
+        if not event or "videomae_top5" not in event:
+            self.list_top5.setEnabled(False)
+            return
+        
+        self.list_top5.setEnabled(True)
+        candidates = event["videomae_top5"]
+        for cand in candidates:
+            item_text = f"{cand['label']} ({cand['score']:.2%})"
+            self.list_top5.addItem(item_text)
 
     def _detect_all_action_labels(self):
         if not self.events:
@@ -2731,10 +2778,11 @@ class HOIWindow(FrameControlMixin, QWidget):
         self.train_worker.progress.connect(self._on_train_progress)
         self.train_worker.finished.connect(self._on_train_finished)
         
-        self.train_progress_dlg = QMessageBox(self)
+        self.train_progress_dlg = QProgressDialog("Initializing training...", "Cancel", 0, 0, self)
         self.train_progress_dlg.setWindowTitle("YOLO Training")
-        self.train_progress_dlg.setText("Initializing training...")
-        self.train_progress_dlg.setStandardButtons(QMessageBox.NoButton)
+        self.train_progress_dlg.setWindowModality(Qt.WindowModal)
+        self.train_progress_dlg.setMinimumDuration(0)
+        self.train_progress_dlg.canceled.connect(self.train_worker.terminate) # Simple kill if canceled
         self.train_progress_dlg.show()
         
         self.train_worker.start()
@@ -2834,12 +2882,18 @@ class HOIWindow(FrameControlMixin, QWidget):
 
     def _on_train_progress(self, msg):
         if hasattr(self, "train_progress_dlg") and self.train_progress_dlg:
-            self.train_progress_dlg.setText(msg)
+            self.train_progress_dlg.setLabelText(msg)
 
     def _on_train_finished(self, success, message):
         if hasattr(self, "train_progress_dlg") and self.train_progress_dlg:
             self.train_progress_dlg.close()
+            self.train_progress_dlg.deleteLater()
+            self.train_progress_dlg = None
         
+        # Give a small buffer for thread to fully unwind
+        QTimer.singleShot(100, lambda: self._show_train_result(success, message))
+
+    def _show_train_result(self, success, message):
         if success:
             self._log("hoi_yolo_train_finished", success=True)
             QMessageBox.information(self, "Training Finished", message)
