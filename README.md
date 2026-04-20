@@ -5,8 +5,9 @@ IMPACT-HOI is a mixed-initiative annotation system for hand-object interaction (
 <div align="center">
   <h1>IMPACT-HOI</h1>
   <p>Supervisory Control for Onset-Anchored Partial HOI Event Construction</p>
-
-  ![Demo Video](./assets/Demo.mp4)
+  <a href="https://www.youtube.com/watch?v=qKZXkzseGFk">
+    <img src="https://img.youtube.com/vi/qKZXkzseGFk/0.jpg" alt="Watch the video" width="100%">
+  </a>
 </div>
 
 ## Table of Contents
@@ -40,7 +41,6 @@ Notes:
 - `requirements.txt` declares `PyQt5`, `opencv-python`, `numpy`, `ultralytics`, `mediapipe`, `torch`, `torchvision`, and `torchaudio`.
 - `Action Assist` additionally imports `Pillow`, `PyYAML`, `transformers`, and `decord`.
 - CUDA is optional. The code uses `torch.cuda.is_available()` and falls back to CPU when needed.
-- Exact tested Python/CUDA/OS versions are not documented in the current release. TODO: add a pinned environment file for the public release.
 
 To launch the application:
 
@@ -227,11 +227,6 @@ This release does **not** ship pretrained checkpoints.
 - Default location:
   - `<video_dir>/runtime_artifacts/mediapipe_models/hand_landmarker.task`
   - or `./runtime_artifacts/mediapipe_models/hand_landmarker.task` if no video is loaded yet
-
-TODO:
-- publish checkpoint download links,
-- provide file hashes,
-- provide one public demo clip with a ready-to-run asset bundle.
 
 ## Quickstart
 
