@@ -3,7 +3,6 @@
 IMPACT-HOI is a mixed-initiative annotation system for hand-object interaction (HOI) event construction in egocentric procedural video. Instead of predicting a full event in one shot, the system maintains a partially specified per-hand event state, proposes onset-anchored local completions, protects confirmed fields from overwrite, and chooses between manual query, human confirmation, and conservative local completion using empirical trust calibration.
 
 <div align="center">
-  <img src="icon.png" width="200"/>
   <h1>IMPACT-HOI</h1>
   <p>Supervisory Control for Onset-Anchored Partial HOI Event Construction</p>
   <video src="./assets/Demo.mp4" width="100%" controls autoplay loop muted></video>
