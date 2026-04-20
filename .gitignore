@@ -35,6 +35,7 @@ e2e_actionformer_videomaev2_g_768x1_160_adapter3_fps6_sde1_p0.5-002.tar.gz
 *.ckpt
 *.avi
 *.mp4
+!assets/*.mp4
 *.log
 *.jsonl
 submission.pdf

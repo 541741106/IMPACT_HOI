@@ -2,12 +2,12 @@
 
 IMPACT-HOI is a mixed-initiative annotation system for hand-object interaction (HOI) event construction in egocentric procedural video. Instead of predicting a full event in one shot, the system maintains a partially specified per-hand event state, proposes onset-anchored local completions, protects confirmed fields from overwrite, and chooses between manual query, human confirmation, and conservative local completion using empirical trust calibration.
 
-> Teaser placeholder  
-> Add one screenshot of the HOI GUI with:
-> 1. one clip loaded,
-> 2. Left/Right event rows visible on the timeline,
-> 3. the assist panel visible,
-> 4. onset grounding boxes rendered on the video frame.
+<div align="center">
+  <img src="icon.png" width="200"/>
+  <h1>IMPACT-HOI</h1>
+  <p>Supervisory Control for Onset-Anchored Partial HOI Event Construction</p>
+  <video src="./assets/Demo.mp4" width="100%" controls autoplay loop muted></video>
+</div>
 
 ## Table of Contents
 
@@ -293,6 +293,8 @@ This section maps the paper's main components to the released code.
 ├── README.md                      # top-level repository README
 ├── requirements.txt               # declared minimum Python dependencies
 ├── LICENSE                        # Apache License 2.0
+├── icon.png                       # application icon
+├── assets/                        # media assets for README (demo video, etc.)
 ├── feature_defaults.json          # local default env settings
 ├── runner_envs.json               # runner profile mapping
 ├── configs/
@@ -322,6 +324,8 @@ This section maps the paper's main components to the released code.
 │   ├── asot_infer_adapter.py      # ASOT MLP inference, needs external ASOT repo
 │   ├── asot_full_infer_adapter.py # ASOT full-model inference, needs external ASOT repo
 │   ├── asot_ckpt_selector.py      # ASOT checkpoint selection helper
+│   ├── evaluate_full_assist_sequential_runtime.py # sequential oracle-correction evaluation (ablation)
+│   ├── train_offline_adapter_all.py      # offline adapter training for cold start
 │   ├── boundary_eval.py           # action-seg boundary evaluation utility
 │   ├── convert_legacy_action_json.py
 │   ├── convert_fine_labels.py
